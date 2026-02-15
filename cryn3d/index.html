@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IsoCryn 3D - Isometric RPG</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a1a;
+      font-family: 'Courier New', monospace;
+      overflow: hidden;
+    }
+    #game-container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+    #ui-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #stats-panel {
+      position: absolute;
+      top: 15px;
+      left: 15px;
+      background: rgba(10, 15, 30, 0.85);
+      padding: 12px 16px;
+      border-radius: 8px;
+      border: 2px solid #3a5a7a;
+      color: #a8d4e8;
+      pointer-events: auto;
+      min-width: 180px;
+    }
+    #stats-panel h2 {
+      font-size: 1.2rem;
+      margin-bottom: 8px;
+      color: #6ec6ff;
+      text-align: center;
+    }
+    .stat {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 5px 0;
+      font-size: 0.9rem;
+    }
+    .stat span:first-child {
+      color: #8ab4d8;
+      width: 30px;
+    }
+    progress {
+      flex: 1;
+      height: 10px;
+      border-radius: 3px;
+      background: #1a2a3a;
+      color: #4ecdc4;
+    }
+    progress::-webkit-progress-bar { background: #1a2a3a; }
+    progress::-webkit-progress-value { background: #4ecdc4; }
+    #battle-panel {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(20, 25, 40, 0.95);
+      padding: 20px;
+      border-radius: 10px;
+      border: 3px solid #e74c3c;
+      min-width: 280px;
+      pointer-events: auto;
+      display: none;
+    }
+    #battle-panel.visible { display: block; }
+    #battle-panel h3 {
+      text-align: center;
+      margin-bottom: 12px;
+      color: #e74c3c;
+      font-size: 1.3rem;
+    }
+    #enemy-info {
+      margin-bottom: 12px;
+      padding: 8px;
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 4px;
+    }
+    #enemy-name {
+      display: block;
+      margin-bottom: 6px;
+      color: #f39c12;
+      font-weight: bold;
+    }
+    #battle-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    #battle-actions button {
+      padding: 10px;
+      background: #3a5a7a;
+      color: white;
+      border: 2px solid #5a8aaa;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.9rem;
+    }
+    #battle-actions button:hover {
+      background: #4a7a9a;
+    }
+    #battle-log {
+      margin-top: 12px;
+      height: 80px;
+      overflow-y: auto;
+      background: rgba(0, 0, 0, 0.5);
+      padding: 8px;
+      border-radius: 4px;
+      font-size: 0.9rem;
+      line-height: 1.5;
+      color: #a8d4e8;
+    }
+    #battle-log .damage { color: #e74c3c; font-weight: bold; }
+    #battle-log .magic { color: #f39c12; font-weight: bold; }
+    #battle-log .heal { color: #2ecc71; font-weight: bold; }
+    #message-log {
+      position: absolute;
+      bottom: 15px;
+      left: 15px;
+      right: 15px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      pointer-events: none;
+    }
+    .message {
+      background: rgba(10, 20, 30, 0.9);
+      padding: 8px 12px;
+      border-radius: 4px;
+      border-left: 3px solid #4ecdc4;
+      color: #a8d4e8;
+      font-size: 0.85rem;
+      max-width: 400px;
+      animation: fadeOut 5s forwards;
+    }
+    @keyframes fadeOut {
+      0% { opacity: 1; }
+      70% { opacity: 1; }
+      100% { opacity: 0; }
+    }
+    #start-screen {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(10, 15, 30, 0.95);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 100;
+    }
+    #start-screen h1 {
+      font-size: 3rem;
+      color: #6ec6ff;
+      margin-bottom: 10px;
+      text-shadow: 0 0 30px rgba(110, 198, 255, 0.6);
+    }
+    #start-screen p {
+      margin-bottom: 20px;
+      color: #8ab4d8;
+    }
+    #btn-start {
+      padding: 15px 40px;
+      font-size: 1.3rem;
+      background: linear-gradient(135deg, #4ecdc4 0%, #44a08d 100%);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    #controls-hint {
+      margin-top: 15px;
+      font-size: 0.9rem;
+      color: #8899aa;
+    }
+    #loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #6ec6ff;
+      font-size: 1.2rem;
+    }
+  </style>
+</head>
+<body>
+  <div id="game-container">
+    <div id="loading">Loading 3D assets...</div>
+    <div id="ui-overlay">
+      <div id="stats-panel">
+        <h2>Cryn</h2>
+        <div class="stat"><span>LV:</span><span id="level">1</span></div>
+        <div class="stat"><span>HP:</span><span id="hp">20</span><progress id="hp-bar" max="20" value="20"></progress></div>
+        <div class="stat"><span>MP:</span><span id="mp">10</span><progress id="mp-bar" max="10" value="10"></progress></div>
+        <div class="stat"><span>XP:</span><span id="xp">0</span><progress id="xp-bar" max="100" value="0"></progress></div>
+        <div class="stat"><span>ATK:</span><span id="attack">5</span></div>
+        <div class="stat"><span>DEF:</span><span id="defense">3</span></div>
+      </div>
+      <div id="battle-panel">
+        <h3>Battle!</h3>
+        <div id="enemy-info">
+          <span id="enemy-name">Enemy</span>
+          <span id="enemy-hp"></span>
+          <progress id="enemy-hp-bar" max="10" value="10"></progress>
+        </div>
+        <div id="battle-actions">
+          <button id="btn-attack">Attack</button>
+          <button id="btn-magic">Magic (3)</button>
+          <button id="btn-item">Item</button>
+          <button id="btn-flee">Flee</button>
+        </div>
+        <div id="battle-log"></div>
+      </div>
+      <div id="message-log"></div>
+    </div>
+    <div id="start-screen">
+      <h1>IsoCryn 3D</h1>
+      <p>An isometric RPG adventure with three.js</p>
+      <button id="btn-start">Begin Journey</button>
+      <p id="controls-hint">Move: Arrow Keys or WASD | Camera automatically follows</p>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="js/game3d.js"></script>
+</body>
+</html>
