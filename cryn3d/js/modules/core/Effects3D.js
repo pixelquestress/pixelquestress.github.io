@@ -23,7 +23,7 @@ export async function playBattleEffect(scene, effectName, fromPos, toPos, durati
   scene.add(sprite);
 
   if (effectName === 'magicmissile' && typeof audioPlay === 'function') {
-    audioPlay('/cryn/music/battleeffects/magicmissile.wav');
+    audioPlay('cryn/music/battleeffects/magicmissile.wav');
   }
 
   const t0 = performance.now();
@@ -141,7 +141,7 @@ export function createJaggedSlashAt(scene, worldPos, size = 2.2, color = 'rgba(2
     pts.push({ x: x + px * j, y: y + py * j });
   }
 
-  if (typeof audioPlay === 'function') audioPlay('/cryn/music/battleeffects/slash.wav');
+  if (typeof audioPlay === 'function') audioPlay('cryn/music/battleeffects/slash.wav');
 
   const tex = new THREE.CanvasTexture(canvas);
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
