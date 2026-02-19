@@ -17,6 +17,11 @@ import { EncounterSystem } from '../interaction/Encounter.js';
 import { UIManager } from '../ui/UIManager.js';
 import { Player3D } from '../player/Player3D.js';
 import { BattleSystem3D } from '../battle/BattleSystem3D.js';
+import * as Effects from './Effects3D.js';
+import * as TextureUtils from './TextureUtils.js';
+import { AudioManager } from './AudioManager.js';
+import { animateCameraTo as ccAnimateCameraTo } from './CameraController.js';
+import { BattleController } from './BattleController.js';
 
 export class Game3D {
   constructor() {
@@ -77,6 +82,18 @@ export class Game3D {
     this.mapBuilder = new MapBuilder(this);
     this.mapLoader = new MapLoader(this);
     this.legacyBuilder = new LegacyLevelBuilder(this);
+    // Battle transition state
+    this._battleCameraState = null;
+    this._battleSceneGroup = null;
+    this._originalBackground = null;
+    this._battleEnemyClone = null;
+    this.inBattleMode = false;
+    this.raycaster = new THREE.Raycaster();
+    this.mouse = new THREE.Vector2();
+    this._battleEnemyBaseScales = [];
+    // Audio + controllers
+    this.audio = new AudioManager();
+    this.battleController = new BattleController(this, this.audio);
   }
 
   async init() {
@@ -103,8 +120,8 @@ export class Game3D {
       // Create player at spawn (Row 11, Column 40 => x=40, y=11)
       this.createPlayer(40, 11);
 
-      // Create enemies
-      this.enemies = new Enemies(this).createEnemies();
+      // Do not pre-place enemies on the map; encounters are random
+      this.enemies = [];
 
       // Setup battle system
       this.player = new Player3D();
@@ -112,6 +129,58 @@ export class Game3D {
       this.battleSystem.on('battleStart', (enemy) => this.onBattleStart(enemy));
       this.battleSystem.on('battleEnd', (result) => this.onBattleEnd(result));
       this.battleSystem.on('reward', (reward) => this.onReward(reward));
+      // Visual effects for attacks/magic
+      this.battleSystem.on('attack', (data) => this.onBattleAttack(data));
+      this.battleSystem.on('magic', (data) => this.onBattleMagic(data));
+      // Update visuals when target changes or enemies are defeated
+      this.battleSystem.on('targetChanged', () => this.updateBattleSelectionVisuals());
+      this.battleSystem.on('enemyDefeated', (d) => {
+        const idx = d && typeof d.index === 'number' ? d.index : null;
+        console.log('enemyDefeated event received, idx=', idx);
+        if (idx === null) return;
+        if (!this._battleEnemyClones || !this._battleEnemyClones[idx]) return;
+        const node = this._battleEnemyClones[idx];
+        // mark as dying to prevent further interaction
+        node.userData.dying = true;
+        // ensure material supports opacity
+        if (node.material) {
+          node.material.transparent = true;
+          node.material.opacity = typeof node.material.opacity === 'number' ? node.material.opacity : 1;
+        }
+
+        // compute a matching color from the enemy texture (if available)
+        let preferredColor = null;
+        try {
+          const tex = node.material && node.material.map ? node.material.map : null;
+          const avg = TextureUtils.getAverageColorFromTexture(tex);
+          if (avg) preferredColor = `rgba(${avg.r},${avg.g},${avg.b},1)`;
+        } catch (e) {
+          preferredColor = null;
+        }
+
+        // spawn blood burst immediately (so it appears with or before the fade)
+        const worldPos = new THREE.Vector3();
+        node.getWorldPosition(worldPos);
+        Effects.spawnBloodBurst(this.scene, worldPos, 700, 14, preferredColor);
+
+        // Play a death/fade effect in parallel, then remove the clone and reindex remaining clones
+        Effects.animateEnemyDeath(this.scene, node, 700).then(() => {
+          // remove from scene/group
+          this._battleSceneGroup && this._battleSceneGroup.remove(node);
+          // remove from arrays
+          this._battleEnemyClones.splice(idx, 1);
+          this._battleEnemyBaseScales.splice(idx, 1);
+          // re-index remaining clones
+          for (let i = 0; i < this._battleEnemyClones.length; i++) {
+            this._battleEnemyClones[i].userData.enemyIndex = i;
+          }
+          // update visuals
+          this.updateBattleSelectionVisuals();
+        }).catch(() => {
+          // fallback immediate removal
+          this._battleSceneGroup && this._battleSceneGroup.remove(node);
+        });
+      });
 
       // Setup input
       this.setupInput();
@@ -128,8 +197,111 @@ export class Game3D {
       // Start animation loop
       this.animate();
 
+        // Background music via AudioManager
+        try {
+          this.audio.playBackground('/cryn/music/forestmu.ogg', { loop: true, volume: 0.6 });
+        } catch (e) {
+          console.warn('Background music init failed', e);
+        }
+
+      // no automatic test battle here anymore
+
       console.log('Tile sheet loaded, level built, ready to render forest tiles');
     });
+  }
+
+  getBattleBackgroundForEnemy(typeOrEnemy) {
+    // Simple mapping based on enemy bmp or type; default to forest
+    return 'cryn/graphics/forest.bmp';
+  }
+
+  onBattleAttack(data) {
+    // data may be {damage, targetIndex} for player attacks or {damage, target:'player'} for enemy attacks
+    const fromWorld = new THREE.Vector3();
+    const toWorld = new THREE.Vector3();
+    if (typeof data.targetIndex === 'number' && this._battleEnemyClones && this._battleEnemyClones[data.targetIndex]) {
+      // player's attack -> target enemy
+      const enemyNode = this._battleEnemyClones[data.targetIndex];
+      this._battlePlayerClone.getWorldPosition(fromWorld);
+      enemyNode.getWorldPosition(toWorld);
+      // diagonal slash across the enemy from top-right to bottom-left
+      Effects.createJaggedSlashAt(this.scene, toWorld, 1.8, 'rgba(220,40,40,1)', 450, 12, 14, 1.0, this.audio.playSfx.bind(this.audio));
+      Effects.showFloatingDamage(this.scene, toWorld, data.damage, 'white');
+    } else if (data && data.target === 'player') {
+      // enemy attacked player
+      if (this._battlePlayerClone) this._battlePlayerClone.getWorldPosition(toWorld);
+      // pick a random alive enemy world position as source if available
+      const aliveNodes = (this._battleEnemyClones || []).filter(n => !n.userData.dying);
+      if (aliveNodes.length > 0) aliveNodes[Math.floor(Math.random() * aliveNodes.length)].getWorldPosition(fromWorld);
+      else fromWorld.copy(toWorld).add(new THREE.Vector3(-1,0,0));
+      // show slash across the player (top-right -> bottom-left)
+      // nudge the slash upward/left so it aligns with the player's head
+      toWorld.add(new THREE.Vector3(-0.25, 0.55, -0.08));
+      // shorten the slash end so it doesn't overshoot the player's lower-left
+      Effects.createJaggedSlashAt(this.scene, toWorld, 1.6, 'rgba(220,40,40,1)', 450, 10, 12, 0.82, this.audio.playSfx.bind(this.audio));
+      Effects.showFloatingDamage(this.scene, toWorld, data.damage, 'red');
+    } else {
+      // fallback: play a simple effect between player and center
+      this._battlePlayerClone && this._battlePlayerClone.getWorldPosition(fromWorld);
+      const center = this._battleSceneGroup ? this._battleSceneGroup.position.clone() : this.playerPos.clone();
+      toWorld.copy(center);
+      Effects.createJaggedSlashAt(this.scene, toWorld, 1.2, 'rgba(220,40,40,1)', 380, 8, 10, 1.0, this.audio.playSfx.bind(this.audio));
+    }
+  }
+
+  onBattleMagic(data) {
+    // similar to attack but with magic visuals
+    const fromWorld = new THREE.Vector3();
+    const toWorld = new THREE.Vector3();
+    if (typeof data.targetIndex === 'number' && this._battleEnemyClones && this._battleEnemyClones[data.targetIndex]) {
+      const enemyNode = this._battleEnemyClones[data.targetIndex];
+      this._battlePlayerClone.getWorldPosition(fromWorld);
+      enemyNode.getWorldPosition(toWorld);
+      Effects.playBattleEffect(this.scene, 'magicmissile', fromWorld, toWorld, 600, this.audio.playSfx.bind(this.audio));
+      Effects.showFloatingDamage(this.scene, toWorld, data.damage, 'white');
+    } else if (data && data.target === 'player') {
+      if (this._battlePlayerClone) this._battlePlayerClone.getWorldPosition(toWorld);
+      const aliveNodes = (this._battleEnemyClones || []).filter(n => !n.userData.dying);
+      if (aliveNodes.length > 0) aliveNodes[Math.floor(Math.random() * aliveNodes.length)].getWorldPosition(fromWorld);
+      else fromWorld.copy(toWorld).add(new THREE.Vector3(-1,0,0));
+      Effects.playBattleEffect(this.scene, 'magicmissile', fromWorld, toWorld, 600, this.audio.playSfx.bind(this.audio));
+      Effects.showFloatingDamage(this.scene, toWorld, data.damage, 'red');
+    } else {
+      this._battlePlayerClone && this._battlePlayerClone.getWorldPosition(fromWorld);
+      const center = this._battleSceneGroup ? this._battleSceneGroup.position.clone() : this.playerPos.clone();
+      toWorld.copy(center);
+      Effects.playBattleEffect(this.scene, 'magicmissile', fromWorld, toWorld, 600, this.audio.playSfx.bind(this.audio));
+    }
+  }
+
+  async playBattleEffect(effectName, fromPos, toPos, duration = 600) {
+    return Effects.playBattleEffect(this.scene, effectName, fromPos, toPos, duration, this.audio.playSfx.bind(this.audio));
+  }
+
+  // Create a quick slash effect as a camera-facing sprite moving from->to
+  createSlashEffect(fromPos, toPos, color = 'white', duration = 450) {
+    return Effects.createSlashEffect(this.scene, fromPos, toPos, color, duration);
+  }
+
+  // Create a diagonal slash centered on a world position.
+  // rotationDeg:  -45 will be top-right -> bottom-left in screen space
+  createDiagonalSlashAt(worldPos, size = 2.2, rotationDeg = -45, color = 'rgba(220,40,40,1)', duration = 450) {
+    return Effects.createDiagonalSlashAt(this.scene, worldPos, size, rotationDeg, color, duration);
+  }
+
+  // Create a jagged slash that grows from the upper-right to bottom-left across a target.
+  createJaggedSlashAt(worldPos, size = 2.2, color = 'rgba(220,40,40,1)', duration = 450, segments = 10, jitter = 12, lengthFactor = 1.0) {
+    return Effects.createJaggedSlashAt(this.scene, worldPos, size, color, duration, segments, jitter, lengthFactor, this.audio.playSfx.bind(this.audio));
+  }
+
+  // Show floating damage number above a world position using a Sprite with text
+  showFloatingDamage(worldPos, amount, color = 'white', duration = 900) {
+    return Effects.showFloatingDamage(this.scene, worldPos, amount, color, duration);
+  }
+
+  // Load an image and convert near-black pixels to transparent, returning a THREE.Texture
+  loadTextureMakeTransparent(path, threshold = 24) {
+    return TextureUtils.loadTextureMakeTransparent(path, threshold);
   }
 
   setupScene() {
@@ -176,17 +348,41 @@ export class Game3D {
   setupInput() {
     document.addEventListener('keydown', (e) => {
       e.preventDefault();
-      this.keys[e.key.toLowerCase()] = true;
-      if (this.battleSystem.inBattle) {
+      // If we're in cinematic battle mode, only allow battle keys
+      if (this.inBattleMode || (this.battleSystem && this.battleSystem.inBattle)) {
         const key = e.key;
         if (key === '1' || key === '2' || key === '3' || key === '4') {
           this.handleBattleKey(key);
         }
+        return;
       }
+
+      this.keys[e.key.toLowerCase()] = true;
     });
 
     document.addEventListener('keyup', (e) => {
       this.keys[e.key.toLowerCase()] = false;
+    });
+
+    // Pointer selection for battle targets
+    document.addEventListener('pointerdown', (e) => {
+      if (!(this.inBattleMode || (this.battleSystem && this.battleSystem.inBattle))) return;
+      if (!this._battleEnemyClones || this._battleEnemyClones.length === 0) return;
+      const rect = this.renderer.domElement.getBoundingClientRect();
+      this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      this.raycaster.setFromCamera(this.mouse, this.camera);
+      const intersects = this.raycaster.intersectObjects(this._battleEnemyClones, true);
+      if (intersects && intersects.length > 0) {
+        // find the top-most clone object with enemyIndex
+        let obj = intersects[0].object;
+        while (obj && typeof obj.userData.enemyIndex !== 'number') obj = obj.parent;
+        if (obj && typeof obj.userData.enemyIndex === 'number') {
+          const idx = obj.userData.enemyIndex;
+          this.battleSystem.selectEnemy(idx);
+          this.updateBattleSelectionVisuals();
+        }
+      }
     });
   }
 
@@ -198,6 +394,39 @@ export class Game3D {
       () => this.battleSystem.useItem(),
       () => this.battleSystem.flee()
     );
+  }
+
+  updateBattleSelectionVisuals() {
+    if (!this._battleEnemyClones || !this._battleEnemyBaseScales) return;
+    const sel = this.battleSystem && typeof this.battleSystem.selectedIndex === 'number' ? this.battleSystem.selectedIndex : 0;
+    for (let i = 0; i < this._battleEnemyClones.length; i++) {
+      const node = this._battleEnemyClones[i];
+      const base = this._battleEnemyBaseScales[i] || new THREE.Vector3(1,1,1);
+      if (node.isSprite || node.isMesh) {
+        node.scale.copy(base);
+        if (i === sel) node.scale.multiplyScalar(1.15);
+      }
+    }
+  }
+
+  // Animate an enemy clone's death (fade + scale) and resolve when removed
+  animateEnemyDeath(node, duration = 600) {
+    return Effects.animateEnemyDeath(this.scene, node, duration);
+  }
+
+  // Try to compute an average color from a THREE.Texture (returns {r,g,b} or null)
+  getAverageColorFromTexture(tex) {
+    return TextureUtils.getAverageColorFromTexture(tex);
+  }
+
+  // Darken an rgba/hex color string by factor (0..1)
+  darkenColor(colorStr, factor = 0.7) {
+    return TextureUtils.darkenColor(colorStr, factor);
+  }
+
+  // Spawn a blood particle burst at world position
+  spawnBloodBurst(worldPos, duration = 700, particleCount = 12, color = null) {
+    return Effects.spawnBloodBurst(this.scene, worldPos, duration, particleCount, color);
   }
 
   createPlayer(startX, startY) {
@@ -459,7 +688,23 @@ export class Game3D {
     this.battleSystem.startBattle(enemy);
     this.battleSystem.updateUI();
     this.updateBattleEnemyHP();
-    this.ui.showBattlePanel(true);
+    // Mark game as in battle mode to block movement
+    this.inBattleMode = true;
+    // clear movement keys and velocity
+    this.keys = {};
+    this.playerVelocity.set(0,0,0);
+    if (this.playerGroup) this.playerGroup.visible = false;
+
+    // Use AudioManager to stop background and start battle music
+    try {
+      this.audio.stopBackground();
+      this.audio.playBattle('/cryn/music/battlemu.ogg', { loop: true, volume: 0.9 });
+    } catch (e) {
+      console.warn('Battle music init failed', e);
+    }
+
+    // Animate into a cinematic battle view
+    this.animateBattleStart().catch(err => console.error(err));
   }
 
   updateBattleEnemyHP() {
@@ -467,23 +712,227 @@ export class Game3D {
   }
 
   onBattleStart(enemy) {
-    this.ui.showBattlePanel(true);
-    this.battleSystem.updateUI();
+    // delegate to BattleController
+    try { this.battleController.onBattleStart(enemy); } catch (e) {}
   }
 
   onBattleEnd(result) {
-    this.ui.showBattlePanel(false);
-    if (!result.victory) {
-      this.showMessage('You were defeated! Refresh to try again.');
+    // Animate camera back to normal then update UI (delegate UI/audio to BattleController)
+    this.animateBattleEnd(result).then(() => {
+      try { this.audio.stopBattle(); this.audio.playBackground('/cryn/music/forestmu.ogg', { loop: true, volume: 0.6 }); } catch (e) {}
+      try { this.battleController.onBattleEnd(result); } catch (e) {}
+    }).catch(err => { console.error(err); });
+  }
+
+  // Smoothly tween the camera position and lookAt point with ease-in-out
+  animateCameraTo(targetPos, targetLookAt, duration = 1200) {
+    const targetFov = arguments.length >= 4 ? arguments[3] : undefined;
+    return ccAnimateCameraTo(this.camera, targetPos, targetLookAt, duration, targetFov);
+  }
+
+  // Transition into the battle scene: clone enemy, change background, move camera
+  async animateBattleStart(enemy) {
+    // Use battleSystem.enemies (array) or battleSystem.enemy (single)
+    const enemies = this.battleSystem.enemies && this.battleSystem.enemies.length ? this.battleSystem.enemies : (this.battleSystem.enemy ? [this.battleSystem.enemy] : []);
+    if (!enemies || enemies.length === 0) return;
+
+    // Save camera/background state (include FOV and current lookAt)
+    const startLookDir = new THREE.Vector3();
+    this.camera.getWorldDirection(startLookDir);
+    const startLookAt = this.camera.position.clone().add(startLookDir.multiplyScalar(10));
+    this._battleCameraState = {
+      pos: this.camera.position.clone(),
+      lookAt: startLookAt,
+      background: this.scene.background,
+      fov: this.camera.fov
+    };
+
+    // Keep the map visible; we will dim with a semi-transparent backdrop but not hide map/enemy groups
+
+    // Create a dedicated battle staging group centered near the player
+    this._battleSceneGroup = new THREE.Group();
+    this._battleSceneGroup.position.copy(this.playerPos);
+
+    // (No backdrop plane: keep the map visible under the battle staging)
+
+    // Create enemy sprites/billboards on the left, stacked vertically.
+    // Load textures and convert black background to transparency first.
+    this._battleEnemyClones = [];
+    const texPromises = enemies.map(e => {
+      if (e && e.bmp) return this.loadTextureMakeTransparent(e.bmp).catch(() => null);
+      return Promise.resolve(null);
+    });
+
+    const texResults = await Promise.all(texPromises);
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      const tex = texResults[i];
+      let node;
+      if (tex) {
+        const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+        // alphaTest removes faint edges from non-alpha formats
+        mat.alphaTest = 0.05;
+        mat.depthWrite = false;
+        mat.depthTest = false; // ensure battle sprites render above tiles
+        const sprite = new THREE.Sprite(mat);
+        sprite.renderOrder = 900;
+        // scale down sprites slightly so they don't dominate the view
+        const baseScale = this.tileSize * (1.0 + (enemies.length - i) * 0.12);
+        const scale = baseScale * 0.65;
+        sprite.scale.set(scale, scale, 1);
+        sprite.position.set(-3, 0.9 + i * 1.0, -2 - i * 0.8);
+        node = sprite;
+      } else {
+        // fallback: simple box
+        const geo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
+        const mat = new THREE.MeshStandardMaterial({ color: 0x884422 });
+        // make sure fallback mesh also appears above tiles
+        mat.depthTest = false;
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = 900;
+        mesh.position.set(-3, 0.4 + i * 0.6, -2 - i * 0.8);
+        node = mesh;
+      }
+      node.userData = { enemy: e, enemyIndex: i };
+      this._battleSceneGroup.add(node);
+      this._battleEnemyClones.push(node);
+      // store base scale for selection visuals
+      if (node.scale) this._battleEnemyBaseScales.push(node.scale.clone());
+    }
+
+    // Create a player battle representation (clone or simple billboard) on the right
+    let playerClone = null;
+    if (this.player3D) {
+      playerClone = this.player3D.clone(true);
+      playerClone.traverse((c) => { if (c.isLight) c.visible = false; });
+      // start clone at the player's current position (relative to the battle group)
+      playerClone.position.set(0, 0, 0);
+      playerClone.scale.set(1.0, 1.0, 1.0);
     } else {
-      const enemy = this.battleSystem.enemy;
-      if (enemy) {
-        enemy.alive = false;
-        enemy.mesh.visible = false;
-        this.showMessage(`${enemy.name} defeated!`);
+      // load hero sprite and make black transparent if necessary
+      let pTex = null;
+      try {
+        pTex = await this.loadTextureMakeTransparent('cryn/graphics/crynhero.bmp').catch(() => null);
+      } catch (e) { pTex = null; }
+      if (pTex) {
+        const pMat = new THREE.SpriteMaterial({ map: pTex, transparent: true });
+        pMat.alphaTest = 0.05;
+        pMat.depthWrite = false;
+        const sprite = new THREE.Sprite(pMat);
+        sprite.scale.set(this.tileSize * 0.8, this.tileSize * 0.8, 1);
+        // start sprite at the player's world origin (group origin); animate into battle offset
+        sprite.position.set(0, 0.9, 0);
+        playerClone = sprite;
+      } else {
+        const fallback = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.9), new THREE.MeshStandardMaterial({ color: 0x446688 }));
+        fallback.position.set(0, 0.4, 0);
+        playerClone = fallback;
       }
     }
-    this.ui.updatePlayerStats();
+
+    this._battleSceneGroup.add(playerClone);
+    this._battlePlayerClone = playerClone;
+    this.scene.add(this._battleSceneGroup);
+
+    // initialize selection to the first enemy and update visuals
+    this.battleSystem.selectEnemy(0);
+    this.updateBattleSelectionVisuals();
+
+    // Do not change the scene background; keep the existing map background visible.
+
+    // Compute camera target: zoom in and move slightly sideways so player is on the right
+    // Use a milder closeup and slightly longer duration for a smoother effect
+    // Camera offsets: position camera so player appears toward bottom-right of view
+    const camOffset = new THREE.Vector3(0, 7, 8);
+    const sideOffset = new THREE.Vector3(1.6, 0, -0.6);
+    const center = this._battleSceneGroup.position.clone().add(new THREE.Vector3(0, 1.0, 0));
+    const targetPos = center.clone().add(camOffset).add(sideOffset);
+    // Shift the lookAt slightly toward the enemies (left/forward) so player sits bottom-right
+    const targetLookAt = center.clone().add(new THREE.Vector3(-0.6, 0.6, -0.8));
+
+    // Animate the player clone from the player's world origin to the battle offset
+    const playerTargetLocal = new THREE.Vector3(3, 0.9, 2);
+    const playerStartLocal = this._battlePlayerClone.position.clone();
+    const animDuration = 1200;
+    const startTime = performance.now();
+    const animatePlayerTick = () => {
+      const now = performance.now();
+      let t = (now - startTime) / animDuration;
+      if (t >= 1) t = 1;
+      const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+      this._battlePlayerClone.position.lerpVectors(playerStartLocal, playerTargetLocal, eased);
+      if (t < 1) requestAnimationFrame(animatePlayerTick);
+    };
+    requestAnimationFrame(animatePlayerTick);
+
+    // Animate camera position and FOV to a moderate close view (less extreme than before)
+    await this.animateCameraTo(targetPos, targetLookAt, animDuration, 52);
+  }
+
+  // Transition back to exploration view
+  async animateBattleEnd(result) {
+    // Restore background
+    if (this._originalBackground) this.scene.background = this._originalBackground;
+
+    // Animate camera back (restore original FOV as well). Also animate the player clone
+    // back to local origin so when we re-enable the real player it doesn't jump.
+    const animDuration = 1200;
+    if (this._battleCameraState) {
+      const s = this._battleCameraState;
+      const cameraPromise = this.animateCameraTo(s.pos, s.lookAt, animDuration, typeof s.fov === 'number' ? s.fov : this.camera.fov);
+
+      let playerPromise = Promise.resolve();
+      if (this._battlePlayerClone) {
+        const startLocal = this._battlePlayerClone.position.clone();
+        const targetLocal = new THREE.Vector3(0, 0, 0);
+        playerPromise = new Promise((resolve) => {
+          const t0 = performance.now();
+          const tick = () => {
+            const now = performance.now();
+            let t = (now - t0) / animDuration;
+            if (t >= 1) t = 1;
+            const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+            this._battlePlayerClone.position.lerpVectors(startLocal, targetLocal, eased);
+            if (t < 1) requestAnimationFrame(tick);
+            else resolve();
+          };
+          requestAnimationFrame(tick);
+        });
+      }
+
+      // Wait for both camera and player clone animations to finish
+      await Promise.all([cameraPromise, playerPromise]);
+    }
+
+    // Remove battle clone and restore map
+    if (this._battleSceneGroup) {
+      this.scene.remove(this._battleSceneGroup);
+      this._battleEnemyClone = null;
+      this._battlePlayerClone = null;
+      this._battleEnemyClones = null;
+      this._battleSceneGroup = null;
+    }
+
+    // Un-hide map layers and enemyGroup and restore player
+    this.mapGroup.visible = true;
+    this.enemyGroup.visible = true;
+    this.decorations.group && (this.decorations.group.visible = true);
+    this.inBattleMode = false;
+    this.keys = {};
+    if (this.playerGroup) this.playerGroup.visible = true;
+
+    // Un-hide the original enemy mesh if it still exists
+    const enemy = this.battleSystem.enemy;
+    if (enemy && enemy.mesh) {
+      enemy.mesh.visible = enemy.alive;
+    }
+
+    // Clear saved state
+    this._battleCameraState = null;
+    this._originalBackground = null;
+    if (this._battleBackdrop) {
+      this._battleBackdrop = null;
+    }
   }
 
   onReward(reward) {

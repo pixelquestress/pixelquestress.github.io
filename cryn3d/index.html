@@ -65,23 +65,26 @@
     progress::-webkit-progress-value { background: #4ecdc4; }
     #battle-panel {
       position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      background: rgba(20, 25, 40, 0.95);
-      padding: 20px;
-      border-radius: 10px;
-      border: 3px solid #e74c3c;
-      min-width: 280px;
+      left: 15px;
+      bottom: 15px;
+      transform: none;
+      background: rgba(6, 8, 12, 0.45); /* more transparent */
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.06);
+      min-width: 180px;
+      max-width: 60vw;
       pointer-events: auto;
       display: none;
+      -webkit-backdrop-filter: blur(2px);
+      backdrop-filter: blur(2px);
     }
     #battle-panel.visible { display: block; }
     #battle-panel h3 {
-      text-align: center;
-      margin-bottom: 12px;
-      color: #e74c3c;
-      font-size: 1.3rem;
+      text-align: left;
+      margin-bottom: 8px;
+      color: #f39c12;
+      font-size: 1.1rem;
     }
     #enemy-info {
       margin-bottom: 12px;
@@ -96,34 +99,38 @@
       font-weight: bold;
     }
     #battle-actions {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
+      display: flex;
+      flex-direction: row;
       gap: 8px;
-      margin-top: 12px;
+      margin-top: 8px;
+      align-items: center;
+      justify-content: flex-start;
     }
     #battle-actions button {
-      padding: 10px;
-      background: #3a5a7a;
+      padding: 8px 12px;
+      background: rgba(60,90,120,0.7);
       color: white;
-      border: 2px solid #5a8aaa;
-      border-radius: 4px;
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 6px;
       cursor: pointer;
       font-family: inherit;
       font-size: 0.9rem;
+      min-width: 84px;
+      opacity: 0.96;
     }
     #battle-actions button:hover {
       background: #4a7a9a;
     }
     #battle-log {
-      margin-top: 12px;
-      height: 80px;
+      margin-top: 10px;
+      height: 64px;
       overflow-y: auto;
-      background: rgba(0, 0, 0, 0.5);
-      padding: 8px;
+      background: rgba(0, 0, 0, 0.25);
+      padding: 6px;
       border-radius: 4px;
-      font-size: 0.9rem;
-      line-height: 1.5;
-      color: #a8d4e8;
+      font-size: 0.85rem;
+      line-height: 1.4;
+      color: #d6eef8;
     }
     #battle-log .damage { color: #e74c3c; font-weight: bold; }
     #battle-log .magic { color: #f39c12; font-weight: bold; }

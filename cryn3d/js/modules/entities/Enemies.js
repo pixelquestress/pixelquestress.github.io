@@ -11,41 +11,17 @@ export class Enemies {
   }
 
   createEnemies() {
+    // Use original Cryn graphics (cryn/graphics/*.bmp) for billboards
     this.enemyData = [
-      {
-        x: 10, y: 6,
-        name: 'Forest Slime',
-        level: 1, hp: 15, maxHp: 15, attack: 3, defense: 1,
-        xpReward: 25, goldReward: 8,
-        color: 0x2ecc71,
-        type: ENEMY_TYPES.SLIME
-      },
-      {
-        x: 15, y: 11,
-        name: 'Wild Boar',
-        level: 2, hp: 25, maxHp: 25, attack: 5, defense: 2,
-        xpReward: 40, goldReward: 15,
-        color: 0xc0392b,
-        type: ENEMY_TYPES.BOAR
-      },
-      {
-        x: 7, y: 14,
-        name: 'Forest Slime',
-        level: 1, hp: 15, maxHp: 15, attack: 3, defense: 1,
-        xpReward: 25, goldReward: 8,
-        color: 0x2ecc71,
-        type: ENEMY_TYPES.SLIME
-      },
-      {
-        x: 0, y: 18,
-        name: 'Ancient Guardian',
-        level: 5, hp: 60, maxHp: 60, attack: 12, defense: 6,
-        xpReward: 150, goldReward: 100,
-        color: 0x8e44ad,
-        type: ENEMY_TYPES.GUARDIAN
-      }
+      { x: 12, y: 10, name: 'Spider', level: 1, hp: 12, maxHp: 12, attack: 3, defense: 0, xpReward: 20, goldReward: 5, bmp: 'cryn/graphics/spider.bmp' },
+      { x: 14, y: 9,  name: 'Gremlin', level: 2, hp: 18, maxHp: 18, attack: 4, defense: 1, xpReward: 30, goldReward: 8, bmp: 'cryn/graphics/gremlin.bmp' },
+      { x: 16, y: 12, name: 'Tree Ent', level: 3, hp: 36, maxHp: 36, attack: 7, defense: 3, xpReward: 60, goldReward: 20, bmp: 'cryn/graphics/foresttreeent.bmp' },
+      { x: 10, y: 14, name: 'Trug', level: 2, hp: 22, maxHp: 22, attack: 5, defense: 2, xpReward: 35, goldReward: 10, bmp: 'cryn/graphics/foresttrug.bmp' },
+      { x: 8,  y: 13, name: 'Leorn', level: 3, hp: 30, maxHp: 30, attack: 6, defense: 3, xpReward: 50, goldReward: 12, bmp: 'cryn/graphics/forestleorn.bmp' },
+      { x: 11, y: 16, name: 'Grey Wolf', level: 2, hp: 20, maxHp: 20, attack: 5, defense: 1, xpReward: 30, goldReward: 9, bmp: 'cryn/graphics/forestwolf.bmp' }
     ];
 
+    this.enemies = [];
     this.enemies = [];
     this.enemyData.forEach(data => {
       const enemy = this.createEnemyMesh(data);
@@ -57,25 +33,29 @@ export class Enemies {
 
   createEnemyMesh(data) {
     const group = new THREE.Group();
-    const { type, color } = data;
-
-    if (type === ENEMY_TYPES.SLIME) {
-      this.createSlimeMesh(group, color);
-    } else if (type === ENEMY_TYPES.BOAR) {
-      this.createBoarMesh(group, color);
-    } else if (type === ENEMY_TYPES.GUARDIAN) {
-      this.createGuardianMesh(group, color);
+    // If a bitmap is supplied, use a billboard sprite so original graphics show
+    if (data.bmp) {
+      const loader = new THREE.TextureLoader();
+      const tex = loader.load(data.bmp);
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+      const sprite = new THREE.Sprite(mat);
+      // scale roughly according to tileSize and optional per-enemy scale
+      const base = this.game.tileSize * 0.7;
+      const s = (data.scale || 1) * base;
+      sprite.scale.set(s, s, 1);
+      sprite.position.y = s * 0.5 / this.game.tileSize;
+      group.add(sprite);
+    } else {
+      // fallback to primitive meshes
+      const { type, color } = data;
+      if (type === ENEMY_TYPES.SLIME) this.createSlimeMesh(group, color);
+      else if (type === ENEMY_TYPES.BOAR) this.createBoarMesh(group, color);
+      else if (type === ENEMY_TYPES.GUARDIAN) this.createGuardianMesh(group, color);
     }
 
     group.position.set(data.x * this.game.tileSize, 0, data.y * this.game.tileSize);
     group.userData = { enemyData: data };
-    return {
-      mesh: group,
-      x: data.x,
-      y: data.y,
-      ...data,
-      alive: true
-    };
+    return Object.assign({ mesh: group, x: data.x, y: data.y, alive: true }, data);
   }
 
   createSlimeMesh(group, color) {
