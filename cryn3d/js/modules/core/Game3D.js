@@ -199,7 +199,7 @@ export class Game3D {
 
         // Background music via AudioManager
         try {
-          this.audio.playBackground('/cryn/music/forestmu.ogg', { loop: true, volume: 0.6 });
+          this.audio.playBackground('cryn/music/forestmu.ogg', { loop: true, volume: 0.6 });
         } catch (e) {
           console.warn('Background music init failed', e);
         }
@@ -698,7 +698,7 @@ export class Game3D {
     // Use AudioManager to stop background and start battle music
     try {
       this.audio.stopBackground();
-      this.audio.playBattle('/cryn/music/battlemu.ogg', { loop: true, volume: 0.9 });
+      this.audio.playBattle('cryn/music/battlemu.ogg', { loop: true, volume: 0.9 });
     } catch (e) {
       console.warn('Battle music init failed', e);
     }
@@ -719,7 +719,7 @@ export class Game3D {
   onBattleEnd(result) {
     // Animate camera back to normal then update UI (delegate UI/audio to BattleController)
     this.animateBattleEnd(result).then(() => {
-      try { this.audio.stopBattle(); this.audio.playBackground('/cryn/music/forestmu.ogg', { loop: true, volume: 0.6 }); } catch (e) {}
+      try { this.audio.stopBattle(); this.audio.playBackground('cryn/music/forestmu.ogg', { loop: true, volume: 0.6 }); } catch (e) {}
       try { this.battleController.onBattleEnd(result); } catch (e) {}
     }).catch(err => { console.error(err); });
   }
