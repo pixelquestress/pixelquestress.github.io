@@ -25,9 +25,9 @@ export class SpritePlayer {
 
     img.onload = () => {
       for (let row = 0; row < 6; row++) {
+        const dir = directions[row];
+        if (!this.spriteTextures[dir]) this.spriteTextures[dir] = [];
         for (let col = 1; col <= 4; col++) {
-          const dir = directions[row];
-          const frame = col - 1;
           const canvas = document.createElement('canvas');
           canvas.width = frameW;
           canvas.height = frameH;
@@ -37,7 +37,7 @@ export class SpritePlayer {
           const texture = new THREE.CanvasTexture(canvas);
           texture.magFilter = THREE.NearestFilter;
           texture.minFilter = THREE.NearestFilter;
-          this.spriteTextures[`${dir}_`] = texture; // Key includes underscore to match original
+          this.spriteTextures[dir].push(texture);
         }
       }
       this.spritesPreloaded = true;
@@ -65,9 +65,10 @@ export class SpritePlayer {
   }
 
   getSpriteTexture(direction) {
-    const key = `${direction}_`;
-    if (this.spriteTextures[key]) {
-      return this.spriteTextures[key];
+    const frames = this.spriteTextures[direction];
+    if (frames && frames.length > 0) {
+      const frameIdx = Math.min(this.playerAnimFrame, frames.length - 1);
+      return frames[frameIdx];
     }
     return this.getPlaceholderTexture();
   }
@@ -111,10 +112,25 @@ export class SpritePlayer {
   }
 
   updateAnimation(delta) {
-    this.playerAnimTimer += delta * 1000;
-    if (this.playerAnimTimer >= CONFIG.ANIM_INTERVAL) {
-      this.playerAnimTimer = 0;
-      this.playerAnimFrame = (this.playerAnimFrame + 1) % 3;
+    // Only animate while the player is moving
+    const moving = this.game && this.game.playerVelocity && this.game.playerVelocity.length() > 0.001;
+    const frames = this.spriteTextures[this.playerFacing] || [];
+    const frameCount = frames.length || 1;
+
+    if (moving) {
+      this.playerAnimTimer += delta * 1000;
+      if (this.playerAnimTimer >= CONFIG.ANIM_INTERVAL) {
+        this.playerAnimTimer = 0;
+        this.playerAnimFrame = (this.playerAnimFrame + 1) % frameCount;
+        this.updateSpriteTexture();
+      }
+    } else {
+      // reset to standing frame 0
+      if (this.playerAnimFrame !== 0) {
+        this.playerAnimFrame = 0;
+        this.playerAnimTimer = 0;
+        this.updateSpriteTexture();
+      }
     }
   }
 

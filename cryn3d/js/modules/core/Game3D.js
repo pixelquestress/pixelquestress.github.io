@@ -10,6 +10,7 @@ import { MapLoader } from '../map/MapLoader.js';
 import { SpritePlayer } from '../entities/SpritePlayer.js';
 import { Enemies } from '../entities/Enemies.js';
 import { Decorations } from '../entities/Decorations.js';
+import { NPCs } from '../entities/NPCs.js';
 import { AtmosphereEffects } from '../atmosphere/Effects.js';
 import { LightsManager } from '../lighting/Lights.js';
 import { CollisionSystem } from '../interaction/Collision.js';
@@ -60,6 +61,7 @@ export class Game3D {
     // Entities
     this.enemies = [];
     this.decorations = new Decorations(this);
+    this.npcs = new NPCs(this);
 
     // Systems
     this.battleSystem = null;
@@ -68,6 +70,7 @@ export class Game3D {
     this.collision = new CollisionSystem(this);
     this.encounter = new EncounterSystem(this);
     this.ui = new UIManager(this);
+    this.dialogActive = false;
 
     // Sprite system
     this.spritePlayer = new SpritePlayer(this);
@@ -119,6 +122,9 @@ export class Game3D {
 
       // Create player at spawn (Row 11, Column 40 => x=40, y=11)
       this.createPlayer(40, 11);
+
+      // create NPCs (city guards)
+      this.npcs.createNPCs();
 
       // Do not pre-place enemies on the map; encounters are random
       this.enemies = [];
@@ -357,6 +363,19 @@ export class Game3D {
         return;
       }
 
+      // If a modal dialog is open, space advances it and no other input should be handled
+      if (this.dialogActive) {
+        if (e.key === ' ' || e.code === 'Space') {
+          this.ui.advanceDialog();
+        }
+        return;
+      }
+
+      // Interaction key (space) handled immediately when not modal
+      if (e.key === ' ' || e.code === 'Space') {
+        this.tryInteract();
+      }
+
       this.keys[e.key.toLowerCase()] = true;
     });
 
@@ -435,7 +454,13 @@ export class Game3D {
     if (this.useSprites) {
       const texture = this.spritePlayer.getSpriteTexture(this.playerFacing);
       this.spritePlayer.spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true });
+      // Render player sprite after tiles to avoid z-fighting/flicker
+      this.spritePlayer.spriteMaterial.depthTest = false;
+      this.spritePlayer.spriteMaterial.depthWrite = false;
+      this.spritePlayer.spriteMaterial.alphaTest = 0.01;
       this.spritePlayer.playerSprite = new THREE.Sprite(this.spritePlayer.spriteMaterial);
+      // Ensure consistent render ordering for sprites
+      this.spritePlayer.playerSprite.renderOrder = 200;
       const scale = 1.2;
       this.spritePlayer.playerSprite.scale.set(scale, scale, 1);
       this.spritePlayer.playerSprite.position.y = 1.0;
@@ -529,6 +554,9 @@ export class Game3D {
 
     this.spritePlayer.updateAnimation(delta);
 
+    // Update NPCs
+    if (this.npcs) this.npcs.update(delta);
+
     // Handle movement
     this.handleMovement(delta);
 
@@ -544,6 +572,7 @@ export class Game3D {
   }
 
   handleMovement(delta) {
+    if (this.dialogActive) return;
     let dx = 0, dy = 0;
     if (this.keys['arrowup'] || this.keys['w']) dy = -1;
     if (this.keys['arrowdown'] || this.keys['s']) dy = 1;
@@ -589,6 +618,29 @@ export class Game3D {
       this.playerFacing = dy > 0 ? 'down' : 'up';
     }
     this.spritePlayer.setFacing(this.playerFacing);
+  }
+
+  tryInteract() {
+    // find adjacent NPC to player
+    const gridX = Math.round(this.playerPos.x / this.tileSize);
+    const gridY = Math.round(this.playerPos.z / this.tileSize);
+    if (!this.npcs) return;
+    const npc = this.npcs.getAdjacentNpc(gridX, gridY);
+    if (!npc) return;
+
+    // Show NPC messages in modal dialog (one at a time)
+    const msgs = npc.msgs || [];
+    if (msgs.length === 0) return;
+    // mark NPC as speaking so it pauses its movement
+    npc.speaking = true;
+    const onClose = () => { npc.speaking = false; };
+    if (this.ui && typeof this.ui.showDialog === 'function') {
+      this.ui.showDialog(msgs, onClose);
+    } else {
+      // fallback: log messages and immediately unmark speaking
+      msgs.forEach(m => this.showMessage(m, 2500));
+      npc.speaking = false;
+    }
   }
 
   updateCamera() {

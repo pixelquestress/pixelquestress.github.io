@@ -206,6 +206,20 @@
       color: #6ec6ff;
       font-size: 1.2rem;
     }
+    /* dialog msgbox canvas styling */
+    #dialog-border-canvas {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      transform-origin: center bottom;
+      transform: scale(0.3);
+      transition: transform 220ms cubic-bezier(.2,.9,.2,1);
+      pointer-events: none;
+      z-index: 110; /* keep canvas behind the inner content */
+    }
+    #dialog-border-canvas.zoomed { transform: scale(1); }
   </style>
 </head>
 <body>
@@ -237,6 +251,15 @@
         <div id="battle-log"></div>
       </div>
       <div id="message-log"></div>
+      <div id="dialog-modal" style="display:none; pointer-events:auto;">
+        <div id="dialog-box" style="position:absolute;left:50%;bottom:80px;transform:translateX(-50%);width:800px;height:170px;color:#d6eef8;font-family:inherit;z-index:120;">
+            <canvas id="dialog-border-canvas" width="560" height="200"></canvas>
+            <div id="dialog-inner" style="position:relative;padding:18px 18px;background:rgba(10,20,30,0.30);border-radius:8px;backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);z-index:121;height:100%;box-sizing:border-box;">
+              <div id="dialog-text" style="white-space:pre-line;line-height:1.45;font-size:1rem;margin-bottom:8px;position:relative;color:#d6eef8;max-height:calc(100% - 12px);overflow:auto;font-size: 22px;"></div>
+
+          </div>
+        </div>
+      </div>
     </div>
     <div id="start-screen">
       <h1>IsoCryn 3D</h1>
