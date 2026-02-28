@@ -125,6 +125,7 @@ export class Game3D {
 
       // create NPCs (city guards)
       this.npcs.createNPCs();
+      //this.npcs.npcs[this.npcs.npcs.length - 1].following = true;
 
       // Do not pre-place enemies on the map; encounters are random
       this.enemies = [];
@@ -627,6 +628,10 @@ export class Game3D {
     if (!this.npcs) return;
     const npc = this.npcs.getAdjacentNpc(gridX, gridY);
     if (!npc) return;
+
+    if (npc.bmp === 'beorne') {
+      npc.following = true;
+    }
 
     // Show NPC messages in modal dialog (one at a time)
     const msgs = npc.msgs || [];
