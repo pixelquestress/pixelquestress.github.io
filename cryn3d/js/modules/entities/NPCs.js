@@ -3,6 +3,15 @@
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js';
 import { CONFIG } from '../constants/index.js';
 
+/*
+Sprite sheet row order:
+0 = left
+1 = up
+2 = down
+3 = right
+4 = unused
+5 = unused
+*/
 export class NPCs {
   constructor(game) {
     this.game = game;
@@ -26,12 +35,15 @@ export class NPCs {
       { x: 31, y: 3,  bmp: 'cityguard'  , area: [5,1,30,20], msgs: [
           "City Guard:\nBe well, Cryn."
         ] },
-      { x: 41, y: 3,  bmp: 'cityguard'  , area: [30,1,45,10], msgs: [
+      { x: 41, y: 3,  bmp: 'cityguard'  , area: [41,3,41,3], msgs: [
           "City Guard:\nOh hello, Cryn! Did you know this game was updated in 2024?",
           "Cryn:\nWow, has it been that long?",
           "Beorne:\nOh for goodness sake! Who really cares?",
           "City Guard:\nSimply amazing."
-        ] }
+        ] },
+      { x: 30, y: 4,  bmp: 'beorne'  , area: [30,4,30,4], msgs: [
+        'Fine. Let\'s just go.'
+      ] },
     ];
 
     list.forEach(n => this._createNPC(n));
@@ -91,15 +103,21 @@ export class NPCs {
     };
     npc.speaking = false;
     npc.msgs = spec.msgs || [];
+    npc.following = false;   // default: wander mode
+    npc.lastPlayerTileX = null;
+    npc.lastPlayerTileY = null;
+    npc.followGoal = null; // the chosen adjacent tile to stick to
 
     // load image and slice frames
     const img = new Image();
     img.onload = () => {
       const cols = Math.max(1, Math.floor(img.width / this.frameW));
-      const rows = Math.max(1, Math.floor(img.height / this.frameH));
-      // Column 0 is blank in these sheets — skip it when slicing frames
-      for (let r = 0; r < rows; r++) {
-        for (let c = 1; c < cols; c++) {
+      const rows = 6; // fixed: 6 rows for directional sprites
+
+      npc.frames = [[],[],[],[],[],[]]; // 6 directional rows
+
+      for (let r = 0; r < 6; r++) {
+        for (let c = 1; c < cols; c++) {        // skip column 0
           const canvas = document.createElement('canvas');
           canvas.width = this.frameW;
           canvas.height = this.frameH;
@@ -109,14 +127,16 @@ export class NPCs {
           const tex = new THREE.CanvasTexture(canvas);
           tex.magFilter = THREE.NearestFilter;
           tex.minFilter = THREE.NearestFilter;
-          npc.frames.push(tex);
+          npc.frames[r].push(tex);
         }
       }
-        if (npc.frames.length > 0) {
-          npc.sprite.material.map = npc.frames[0];
-          npc.sprite.material.needsUpdate = true;
-        }
+
+      if (npc.frames[2] && npc.frames[2].length > 0) {
+        npc.sprite.material.map = npc.frames[2][0];
+        npc.sprite.material.needsUpdate = true;
+      }
     };
+
     // prefer png in assets, fallback to original tiles bmp
     img.src = `assets/sprites/${spec.bmp}.png`;
     img.onerror = () => {
@@ -163,54 +183,177 @@ export class NPCs {
   update(delta) {
     if (!this.npcs || this.npcs.length === 0) return;
     const dt = delta;
+
     this.npcs.forEach(npc => {
-      // if NPC is currently speaking in a dialog, do not update movement
       if (npc.speaking) return;
-      // animation update
-      const moving = npc.targetTile && (npc.tileX !== npc.targetTile.x || npc.tileY !== npc.targetTile.y || npc.pos.distanceTo(new THREE.Vector3(npc.targetTile.x * this.game.tileSize,0,npc.targetTile.y * this.game.tileSize)) > 0.05);
-      if (moving && npc.frames && npc.frames.length > 1) {
+
+      const moving =
+        npc.targetTile &&
+        (npc.tileX !== npc.targetTile.x ||
+        npc.tileY !== npc.targetTile.y ||
+        npc.pos.distanceTo(
+          new THREE.Vector3(
+            npc.targetTile.x * this.game.tileSize,
+            0,
+            npc.targetTile.y * this.game.tileSize
+          )
+        ) > 0.05);
+
+      // walking = actually allowed to move this frame
+      const walking = moving && npc.waitTimer <= 0;
+
+      const targetWorld = new THREE.Vector3(
+        npc.targetTile.x * this.game.tileSize,
+        0,
+        npc.targetTile.y * this.game.tileSize
+      );
+
+      const toTarget = targetWorld.clone().sub(npc.pos);
+      const dist = toTarget.length();
+
+      if (dist >= 0.05) {
+        toTarget.normalize();
+      }
+
+      // use tile deltas and remap to actual visual rows
+      if (walking) {
+        const dx = npc.targetTile.x - npc.tileX;
+        const dy = npc.targetTile.y - npc.tileY;
+
+        if (Math.abs(dx) > Math.abs(dy)) {
+          // horizontal
+          npc.dirRow = (dx < 0) ? 0 : 3;   // LEFT=row 0, RIGHT=row 3
+        } else {
+          // vertical
+          npc.dirRow = (dy < 0) ? 1 : 2;   // UP=row 1, DOWN=row 2
+        }
+      }
+
+      // --- ANIMATION AFTER DIRECTION ---
+      const row = npc.dirRow;
+      const rowFrames = npc.frames[row];
+
+      if (walking && rowFrames && rowFrames.length > 1) {
         npc.animTimer += dt * 1000;
         if (npc.animTimer >= CONFIG.ANIM_INTERVAL) {
           npc.animTimer = 0;
-          npc.animIdx = (npc.animIdx + 1) % npc.frames.length;
-          npc.sprite.material.map = npc.frames[npc.animIdx];
+          npc.animIdx = (npc.animIdx + 1) % rowFrames.length;
+          npc.sprite.material.map = rowFrames[npc.animIdx];
           npc.sprite.material.needsUpdate = true;
         }
       } else {
-        // standing frame 0
-        if (npc.frames && npc.frames.length > 0) {
-          npc.animIdx = 0;
-          npc.sprite.material.map = npc.frames[0];
+        npc.animIdx = 0;
+        if (rowFrames && rowFrames.length > 0) {
+          npc.sprite.material.map = rowFrames[0];
           npc.sprite.material.needsUpdate = true;
         }
       }
 
+      // --- MOVEMENT ---
       if (npc.waitTimer > 0) {
         npc.waitTimer -= dt * 1000;
         return;
       }
 
-      // if reached current target tile (center), pick a new adjacent target
-      const targetWorld = new THREE.Vector3(npc.targetTile.x * this.game.tileSize, 0, npc.targetTile.y * this.game.tileSize);
-      const toTarget = targetWorld.clone().sub(npc.pos);
-      const dist = toTarget.length();
       if (dist < 0.05) {
-        // snap to tile center
         npc.pos.copy(targetWorld);
         npc.tileX = npc.targetTile.x;
         npc.tileY = npc.targetTile.y;
-        // wait a bit, then choose next
-        npc.waitTimer = 300 + Math.random() * 1200;
-        npc.targetTile = this._chooseNearbyTile(npc.tileX, npc.tileY, npc.area);
+
+        if (npc.following) {
+          const px = Math.round(this.game.playerPos.x / this.game.tileSize);
+          const py = Math.round(this.game.playerPos.z / this.game.tileSize);
+
+          const playerMovedTile =
+            npc.lastPlayerTileX !== px || npc.lastPlayerTileY !== py;
+
+          // If follower reached its goal tile, stop until player moves
+          if (!playerMovedTile &&
+              npc.followGoal &&
+              npc.tileX === npc.followGoal.x &&
+              npc.tileY === npc.followGoal.y) {
+
+            npc.targetTile = { x: npc.tileX, y: npc.tileY };
+            npc.waitTimer = 0;
+            return;
+          }
+
+          // If the player moved, choose a NEW adjacent tile
+          if (playerMovedTile || !npc.followGoal) {
+            npc.lastPlayerTileX = px;
+            npc.lastPlayerTileY = py;
+
+            const adj = [
+              { x: px - 1, y: py },
+              { x: px + 1, y: py },
+              { x: px,     y: py - 1 },
+              { x: px,     y: py + 1 },
+            ];
+
+            const validAdj = adj.filter(t =>
+              this.game.collision.isWalkable(t.x, t.y) &&
+              !this.npcs.some(n => n.tileX === t.x && n.tileY === t.y)
+            );
+
+            if (validAdj.length > 0) {
+              validAdj.sort((a, b) => {
+                const da = Math.abs(a.x - npc.tileX) + Math.abs(a.y - npc.tileY);
+                const db = Math.abs(b.x - npc.tileX) + Math.abs(b.y - npc.tileY);
+                return da - db;
+              });
+              npc.followGoal = validAdj[0];
+            } else {
+              npc.followGoal = { x: npc.tileX, y: npc.tileY };
+            }
+          }
+
+          // Take ONE step toward the locked goal
+          npc.targetTile = this._chooseStepToward(npc, npc.followGoal.x, npc.followGoal.y);
+          npc.waitTimer = 0;
+        } else {
+          npc.waitTimer = 300 + Math.random() * 1200;
+          npc.targetTile = this._chooseNearbyTile(npc.tileX, npc.tileY, npc.area);
+        }
+
         return;
       }
 
-      // move toward center of target tile at tile-grid aligned speed
-      toTarget.normalize();
       const moveDist = npc.speed * dt;
       const move = toTarget.multiplyScalar(moveDist);
       npc.pos.add(move);
       npc.group.position.copy(npc.pos);
     });
+  }
+
+  setNpcFollow(npc, follow = true) {
+    npc.following = follow;
+  }
+
+  _chooseStepToward(npc, goalX, goalY) {
+    const dirs = [
+      { dx:  1, dy:  0 },
+      { dx: -1, dy:  0 },
+      { dx:  0, dy:  1 },
+      { dx:  0, dy: -1 },
+    ];
+
+    const candidates = dirs
+      .map(d => ({ x: npc.tileX + d.dx, y: npc.tileY + d.dy }))
+      .filter(t =>
+        this.game.collision.isWalkable(t.x, t.y) &&
+        !this.npcs.some(n => n.tileX === t.x && n.tileY === t.y)
+      );
+
+    if (candidates.length === 0) {
+      return { x: npc.tileX, y: npc.tileY };
+    }
+
+    candidates.sort((a, b) => {
+      const da = Math.abs(a.x - goalX) + Math.abs(a.y - goalY);
+      const db = Math.abs(b.x - goalX) + Math.abs(b.y - goalY);
+      return da - db;
+    });
+
+    return candidates[0];
   }
 }
