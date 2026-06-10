@@ -23,6 +23,7 @@ import * as TextureUtils from './TextureUtils.js';
 import { AudioManager } from './AudioManager.js';
 import { animateCameraTo as ccAnimateCameraTo } from './CameraController.js';
 import { BattleController } from './BattleController.js';
+import { JungleLevel } from '../map/JungleLevel.js';
 
 export class Game3D {
   constructor() {
@@ -71,6 +72,7 @@ export class Game3D {
     this.encounter = new EncounterSystem(this);
     this.ui = new UIManager(this);
     this.dialogActive = false;
+    this.level = new JungleLevel(this);
 
     // Sprite system
     this.spritePlayer = new SpritePlayer(this);
@@ -94,9 +96,12 @@ export class Game3D {
     this.raycaster = new THREE.Raycaster();
     this.mouse = new THREE.Vector2();
     this._battleEnemyBaseScales = [];
+    this._battleMapActorSwap = null;
     // Audio + controllers
     this.audio = new AudioManager();
     this.battleController = new BattleController(this, this.audio);
+    this._beorneBattleToggle = true;
+    this.activeBattleActor = { name: 'Cryn', bmp: 'cryn/tiles/hero.bmp' };
   }
 
   async init() {
@@ -120,8 +125,8 @@ export class Game3D {
       // Load the jungle map
       await this.mapLoader.loadMapFromUrl('maps/jungle.txt');
 
-      // Create player at spawn (Row 11, Column 40 => x=40, y=11)
-      this.createPlayer(40, 11);
+      // Create player at the original C++ jungle spawn (tile 37, 8).
+      this.createPlayer(37, 8);
 
       // create NPCs (city guards)
       this.npcs.createNPCs();
@@ -307,8 +312,8 @@ export class Game3D {
   }
 
   // Load an image and convert near-black pixels to transparent, returning a THREE.Texture
-  loadTextureMakeTransparent(path, threshold = 24) {
-    return TextureUtils.loadTextureMakeTransparent(path, threshold);
+  loadTextureMakeTransparent(path, threshold = 24, crop = null) {
+    return TextureUtils.loadTextureMakeTransparent(path, threshold, crop);
   }
 
   setupScene() {
@@ -609,6 +614,7 @@ export class Game3D {
       if (!this.encounter.checkEnemyEncounter(gridX, gridY)) {
         this.encounter.checkChest(gridX, gridY);
       }
+      if (this.level) this.level.handleStep(gridX, gridY);
     }
   }
 
@@ -628,6 +634,10 @@ export class Game3D {
     if (!this.npcs) return;
     const npc = this.npcs.getAdjacentNpc(gridX, gridY);
     if (!npc) return;
+
+    if (this.level && this.level.handleNpcInteraction(npc)) {
+      return;
+    }
 
     if (npc.bmp === 'beorne') {
       npc.following = true;
@@ -741,8 +751,9 @@ export class Game3D {
   }
 
   // Battle integration
-  startBattle(enemy) {
-    this.battleSystem.startBattle(enemy);
+  startBattle(enemy, options = {}) {
+    options = this.resolveBattleActor(options);
+    this.battleSystem.startBattle(enemy, options);
     this.battleSystem.updateUI();
     this.updateBattleEnemyHP();
     // Mark game as in battle mode to block movement
@@ -777,14 +788,88 @@ export class Game3D {
     // Animate camera back to normal then update UI (delegate UI/audio to BattleController)
     this.animateBattleEnd(result).then(() => {
       try { this.audio.stopBattle(); this.audio.playBackground('cryn/music/forestmu.ogg', { loop: true, volume: 0.6 }); } catch (e) {}
+      try { this.level && this.level.onBattleEnd(result); } catch (e) { console.error(e); }
       try { this.battleController.onBattleEnd(result); } catch (e) {}
     }).catch(err => { console.error(err); });
+  }
+
+  resolveBattleActor(options = {}) {
+    if (options.actorName) {
+      this.activeBattleActor = {
+        name: options.actorName,
+        bmp: options.actorBmp || (options.actorName === 'Beorne' ? 'cryn/tiles/beorne.bmp' : 'cryn/tiles/hero.bmp'),
+      };
+      return options;
+    }
+
+    const location = this.level && typeof this.level.location === 'number' ? this.level.location : 0;
+    const shouldAlternateWithBeorne = location > 0 && location < 30;
+    if (shouldAlternateWithBeorne) {
+      this._beorneBattleToggle = !this._beorneBattleToggle;
+      const isBeorne = this._beorneBattleToggle;
+      this.activeBattleActor = {
+        name: isBeorne ? 'Beorne' : 'Cryn',
+        bmp: isBeorne ? 'cryn/tiles/beorne.bmp' : 'cryn/tiles/hero.bmp',
+      };
+    } else {
+      this.activeBattleActor = { name: 'Cryn', bmp: 'cryn/tiles/hero.bmp' };
+    }
+
+    return {
+      ...options,
+      actorName: this.activeBattleActor.name,
+      actorBmp: this.activeBattleActor.bmp,
+    };
   }
 
   // Smoothly tween the camera position and lookAt point with ease-in-out
   animateCameraTo(targetPos, targetLookAt, duration = 1200) {
     const targetFov = arguments.length >= 4 ? arguments[3] : undefined;
     return ccAnimateCameraTo(this.camera, targetPos, targetLookAt, duration, targetFov);
+  }
+
+  async createBattleActorNode() {
+    const actor = this.activeBattleActor || { name: 'Cryn', bmp: 'cryn/tiles/hero.bmp' };
+    let tex = null;
+    try {
+      // If actor is the hero or Beorne sprite sheet, crop to the single standing frame at col=1,row=0
+      const actorPathLower = (actor.bmp || '').toLowerCase();
+      if (actorPathLower.indexOf('hero') !== -1 || actorPathLower.indexOf('beorne') !== -1) {
+        const crop = { x: CONFIG.FRAME_WIDTH * 1, y: CONFIG.FRAME_HEIGHT * 0, w: CONFIG.FRAME_WIDTH, h: CONFIG.FRAME_HEIGHT };
+        tex = await this.loadTextureMakeTransparent(actor.bmp, 24, crop).catch(() => null);
+      } else {
+        tex = await this.loadTextureMakeTransparent(actor.bmp).catch(() => null);
+      }
+    } catch (e) {
+      tex = null;
+    }
+
+    if (!tex && actor.name === 'Cryn' && this.player3D) {
+      const playerClone = this.player3D.clone(true);
+      playerClone.traverse((c) => { if (c.isLight) c.visible = false; });
+      playerClone.position.set(0, 0, 0);
+      playerClone.scale.set(1.0, 1.0, 1.0);
+      return playerClone;
+    }
+
+    if (tex) {
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+      mat.alphaTest = 0.05;
+      mat.depthWrite = false;
+      mat.depthTest = false;
+      const sprite = new THREE.Sprite(mat);
+      sprite.renderOrder = 900;
+      sprite.scale.set(this.tileSize * 0.95, this.tileSize * 0.95, 1);
+      sprite.position.set(0, 0.9, 0);
+      return sprite;
+    }
+
+    const fallback = new THREE.Mesh(
+      new THREE.BoxGeometry(0.9, 0.9, 0.9),
+      new THREE.MeshStandardMaterial({ color: actor.name === 'Beorne' ? 0x222222 : 0x446688 })
+    );
+    fallback.position.set(0, 0.4, 0);
+    return fallback;
   }
 
   // Transition into the battle scene: clone enemy, change background, move camera
@@ -857,38 +942,44 @@ export class Game3D {
       if (node.scale) this._battleEnemyBaseScales.push(node.scale.clone());
     }
 
-    // Create a player battle representation (clone or simple billboard) on the right
-    let playerClone = null;
-    if (this.player3D) {
-      playerClone = this.player3D.clone(true);
-      playerClone.traverse((c) => { if (c.isLight) c.visible = false; });
-      // start clone at the player's current position (relative to the battle group)
-      playerClone.position.set(0, 0, 0);
-      playerClone.scale.set(1.0, 1.0, 1.0);
-    } else {
-      // load hero sprite and make black transparent if necessary
-      let pTex = null;
-      try {
-        pTex = await this.loadTextureMakeTransparent('cryn/graphics/crynhero.bmp').catch(() => null);
-      } catch (e) { pTex = null; }
-      if (pTex) {
-        const pMat = new THREE.SpriteMaterial({ map: pTex, transparent: true });
-        pMat.alphaTest = 0.05;
-        pMat.depthWrite = false;
-        const sprite = new THREE.Sprite(pMat);
-        sprite.scale.set(this.tileSize * 0.8, this.tileSize * 0.8, 1);
-        // start sprite at the player's world origin (group origin); animate into battle offset
-        sprite.position.set(0, 0.9, 0);
-        playerClone = sprite;
-      } else {
-        const fallback = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.9), new THREE.MeshStandardMaterial({ color: 0x446688 }));
-        fallback.position.set(0, 0.4, 0);
-        playerClone = fallback;
-      }
-    }
+    // Create the active battle actor on the right. Forest battles alternate Cryn/Beorne.
+    const playerClone = await this.createBattleActorNode();
 
     this._battleSceneGroup.add(playerClone);
     this._battlePlayerClone = playerClone;
+
+    // If there was a previous temporary swap (from an earlier interrupted battle), revert it first
+    if (this._battleMapActorSwap) {
+      try {
+        const sw = this._battleMapActorSwap;
+        if (sw.addedClone && sw.addedClone.parent) sw.addedClone.parent.remove(sw.addedClone);
+        if (sw.hiddenNpcs && Array.isArray(sw.hiddenNpcs)) {
+          for (const n of sw.hiddenNpcs) { if (n && n.group) n.group.visible = true; }
+        }
+        if (sw.hiddenPlayerGroup) {
+          if (this.playerGroup) this.playerGroup.visible = true;
+        }
+      } catch (e) {}
+      this._battleMapActorSwap = null;
+    }
+
+    // Hide both the standing player and Beorne's map NPC during battle so only the main battle actor shows
+    try {
+      const hiddenNpcs = [];
+      if (this.npcs && typeof this.npcs.getNpcById === 'function') {
+        const beorneNpc = this.npcs.getNpcById('beorne');
+        if (beorneNpc && beorneNpc.group) {
+          beorneNpc.group.visible = false;
+          hiddenNpcs.push(beorneNpc);
+        }
+      }
+      const hidePlayer = !!this.playerGroup;
+      if (hidePlayer) this.playerGroup.visible = false;
+      // record what we hid so it can be restored later
+      if (hiddenNpcs.length > 0 || hidePlayer) {
+        this._battleMapActorSwap = { hiddenNpcs, hiddenPlayerGroup: hidePlayer, addedClone: null };
+      }
+    } catch (e) {}
     this.scene.add(this._battleSceneGroup);
 
     // initialize selection to the first enemy and update visuals
@@ -955,6 +1046,20 @@ export class Game3D {
           };
           requestAnimationFrame(tick);
         });
+      // Restore any temporary map actor swaps (e.g., hidden NPCs or hidden playerGroup)
+      if (this._battleMapActorSwap) {
+        try {
+          const sw = this._battleMapActorSwap;
+          if (sw.addedClone && sw.addedClone.parent) sw.addedClone.parent.remove(sw.addedClone);
+          if (sw.hiddenNpcs && Array.isArray(sw.hiddenNpcs)) {
+            for (const n of sw.hiddenNpcs) { if (n && n.group) n.group.visible = true; }
+          }
+          if (sw.hiddenPlayerGroup) {
+            if (this.playerGroup) this.playerGroup.visible = true;
+          }
+        } catch (e) {}
+        this._battleMapActorSwap = null;
+      }
       }
 
       // Wait for both camera and player clone animations to finish

@@ -23,27 +23,29 @@ export class NPCs {
   createNPCs() {
     // Positions copied from original RPGMap.cpp TownFolk entries
     const list = [
-      { x: 8,  y: 6,  bmp: 'cityguard2' , area: [5,1,30,20], msgs: [
+      { id: 'king', x: 5, y: 6, bmp: 'king', bmpPath: 'cryn/graphics/king.bmp', area: [5,6,5,6], stationary: true, msgs: [] },
+      { id: 'guard1', x: 8,  y: 6,  bmp: 'cityguard2' , area: [5,1,30,20], msgs: [
           "City Guard:\nGood to see you again, Cryn."
         ] },
-      { x: 20, y: 1,  bmp: 'cityguard2' , area: [5,1,30,20], msgs: [
+      { id: 'guard2', x: 20, y: 1,  bmp: 'cityguard2' , area: [5,1,30,20], msgs: [
           "City Guard:\nLooks like it's going to be another rainy day."
         ] },
-      { x: 31, y: 16, bmp: 'cityguard'  , area: [5,1,30,20], msgs: [
+      { id: 'guard3', x: 31, y: 16, bmp: 'cityguard'  , area: [5,1,30,20], msgs: [
           "City Guard:\nGood day Cryn, let me know when you want to explore the forest again."
         ] },
-      { x: 31, y: 3,  bmp: 'cityguard'  , area: [5,1,30,20], msgs: [
+      { id: 'guard4', x: 31, y: 3,  bmp: 'cityguard'  , area: [5,1,30,20], msgs: [
           "City Guard:\nBe well, Cryn."
         ] },
-      { x: 41, y: 3,  bmp: 'cityguard'  , area: [41,3,41,3], msgs: [
+      { id: 'guard7', x: 41, y: 3,  bmp: 'cityguard'  , area: [30,1,45,10], msgs: [
           "City Guard:\nOh hello, Cryn! Did you know this game was updated in 2024?",
           "Cryn:\nWow, has it been that long?",
           "Beorne:\nOh for goodness sake! Who really cares?",
           "City Guard:\nSimply amazing."
         ] },
-      { x: 30, y: 4,  bmp: 'beorne'  , area: [30,4,30,4], msgs: [
-        'Fine. Let\'s just go.'
+      { id: 'beorne', x: 10, y: 6, bmp: 'beorne', area: [0,0,79,41], following: true, msgs: [
+        "Beorne:\nFine. Let's just go."
       ] },
+      { id: 'lineer', x: 54, y: 26, bmp: 'forestmonster', area: [51,27,57,29], msgs: [] },
     ];
 
     list.forEach(n => this._createNPC(n));
@@ -53,8 +55,16 @@ export class NPCs {
     const ctx = canvas.getContext('2d');
     const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imgData.data;
+    const key = { r: data[0], g: data[1], b: data[2] };
+    const tolerance = 6;
     for (let i = 0; i < data.length; i += 4) {
-      if (data[i] < 30 && data[i+1] < 30 && data[i+2] < 30) data[i+3] = 0;
+      if (
+        Math.abs(data[i] - key.r) <= tolerance &&
+        Math.abs(data[i + 1] - key.g) <= tolerance &&
+        Math.abs(data[i + 2] - key.b) <= tolerance
+      ) {
+        data[i + 3] = 0;
+      }
     }
     ctx.putImageData(imgData, 0, 0);
   }
@@ -80,30 +90,32 @@ export class NPCs {
     group.add(sprite);
 
     group.position.set(spec.x * this.game.tileSize, 0, spec.y * this.game.tileSize);
-    group.userData = { npc: true, bmp: spec.bmp };
+    group.userData = { npc: true, bmp: spec.bmp, id: spec.id };
     // Add NPCs to the world map group so they don't move with the player
     this.game.mapGroup.add(group);
 
     const npc = {
       group,
       sprite,
+      id: spec.id || spec.bmp,
       bmp: spec.bmp,
       x: spec.x,
       y: spec.y,
       tileX: spec.x,
       tileY: spec.y,
       pos: new THREE.Vector3(spec.x * this.game.tileSize, 0, spec.y * this.game.tileSize),
-      speed: 3.0, // units per second (world units)
+      speed: spec.following ? this.game.moveSpeed * 1.2 : 3.0,
       area: { minX: spec.area[0], minY: spec.area[1], maxX: spec.area[2], maxY: spec.area[3] },
       targetTile: null,
-      waitTimer: 0,
+      waitTimer: spec.stationary ? Number.POSITIVE_INFINITY : 0,
       frames: [],
       animIdx: 0,
       animTimer: 0
     };
     npc.speaking = false;
     npc.msgs = spec.msgs || [];
-    npc.following = false;   // default: wander mode
+    npc.following = !!spec.following;   // default: wander mode
+    npc.stationary = !!spec.stationary;
     npc.lastPlayerTileX = null;
     npc.lastPlayerTileY = null;
     npc.followGoal = null; // the chosen adjacent tile to stick to
@@ -140,6 +152,9 @@ export class NPCs {
     // prefer png in assets, fallback to original tiles bmp
     img.src = `assets/sprites/${spec.bmp}.png`;
     img.onerror = () => {
+      img.onerror = () => {
+        if (spec.bmpPath && img.src !== spec.bmpPath) img.src = spec.bmpPath;
+      };
       img.src = `cryn/tiles/${spec.bmp}.bmp`;
     };
 
@@ -157,6 +172,16 @@ export class NPCs {
       if ((dx === 1 && dy === 0) || (dx === 0 && dy === 1)) return n;
     }
     return null;
+  }
+
+  getNpcById(id) {
+    return this.npcs.find(n => n.id === id);
+  }
+
+  removeNpc(npc) {
+    if (!npc) return;
+    if (npc.group && npc.group.parent) npc.group.parent.remove(npc.group);
+    this.npcs = this.npcs.filter(n => n !== npc);
   }
 
   _chooseNearbyTile(tx, ty, area) {
@@ -186,6 +211,11 @@ export class NPCs {
 
     this.npcs.forEach(npc => {
       if (npc.speaking) return;
+      if (npc.stationary) return;
+
+      if (npc.following) {
+        this._lockFollowerNextToPlayer(npc);
+      }
 
       const moving =
         npc.targetTile &&
@@ -327,6 +357,65 @@ export class NPCs {
 
   setNpcFollow(npc, follow = true) {
     npc.following = follow;
+  }
+
+  _lockFollowerNextToPlayer(npc) {
+    if (!this.game || !this.game.playerPos || !this.game.collision) return;
+
+    const px = Math.round(this.game.playerPos.x / this.game.tileSize);
+    const py = Math.round(this.game.playerPos.z / this.game.tileSize);
+    const isAdjacent = Math.abs(npc.tileX - px) + Math.abs(npc.tileY - py) === 1;
+    const playerMovedTile = npc.lastPlayerTileX !== px || npc.lastPlayerTileY !== py;
+
+    if (isAdjacent && !playerMovedTile) return;
+
+    const previous = npc.lastPlayerTileX !== null && npc.lastPlayerTileY !== null
+      ? { x: npc.lastPlayerTileX, y: npc.lastPlayerTileY }
+      : null;
+    npc.lastPlayerTileX = px;
+    npc.lastPlayerTileY = py;
+
+    const adj = [
+      previous,
+      { x: px - 1, y: py },
+      { x: px + 1, y: py },
+      { x: px, y: py - 1 },
+      { x: px, y: py + 1 },
+    ].filter(Boolean);
+
+    const validAdj = adj.filter(t =>
+      this.game.collision.isWalkable(t.x, t.y) &&
+      !(t.x === px && t.y === py) &&
+      !this.npcs.some(n => n !== npc && n.tileX === t.x && n.tileY === t.y)
+    );
+
+    if (validAdj.length === 0) return;
+
+    validAdj.sort((a, b) => {
+      const aWasPrevious = previous && a.x === previous.x && a.y === previous.y ? -100 : 0;
+      const bWasPrevious = previous && b.x === previous.x && b.y === previous.y ? -100 : 0;
+      const da = Math.abs(a.x - npc.tileX) + Math.abs(a.y - npc.tileY) + aWasPrevious;
+      const db = Math.abs(b.x - npc.tileX) + Math.abs(b.y - npc.tileY) + bWasPrevious;
+      return da - db;
+    });
+
+    const target = validAdj[0];
+    npc.followGoal = target;
+    npc.targetTile = target;
+
+    if (!isAdjacent || playerMovedTile) {
+      this._placeNpcAtTile(npc, target.x, target.y);
+    }
+  }
+
+  _placeNpcAtTile(npc, x, y) {
+    npc.tileX = x;
+    npc.tileY = y;
+    npc.pos.set(x * this.game.tileSize, 0, y * this.game.tileSize);
+    npc.group.position.copy(npc.pos);
+    npc.targetTile = { x, y };
+    npc.followGoal = { x, y };
+    npc.waitTimer = 0;
   }
 
   _chooseStepToward(npc, goalX, goalY) {

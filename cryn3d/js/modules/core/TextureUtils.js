@@ -1,23 +1,32 @@
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js';
 
-export async function loadTextureMakeTransparent(path, threshold = 24) {
+export async function loadTextureMakeTransparent(path, threshold = 6, crop = null) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = '';
     img.onload = () => {
       try {
-        const w = img.width;
-        const h = img.height;
+        const srcW = crop && typeof crop.w === 'number' ? crop.w : img.width;
+        const srcH = crop && typeof crop.h === 'number' ? crop.h : img.height;
         const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
+        canvas.width = srcW;
+        canvas.height = srcH;
         const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-        const data = ctx.getImageData(0, 0, w, h);
+        if (crop && typeof crop.x === 'number' && typeof crop.y === 'number') {
+          ctx.drawImage(img, crop.x, crop.y, srcW, srcH, 0, 0, srcW, srcH);
+        } else {
+          ctx.drawImage(img, 0, 0);
+        }
+        const data = ctx.getImageData(0, 0, srcW, srcH);
         const px = data.data;
+        const key = { r: px[0], g: px[1], b: px[2] };
         for (let i = 0; i < px.length; i += 4) {
           const r = px[i], g = px[i+1], b = px[i+2];
-          if (r <= threshold && g <= threshold && b <= threshold) {
+          if (
+            Math.abs(r - key.r) <= threshold &&
+            Math.abs(g - key.g) <= threshold &&
+            Math.abs(b - key.b) <= threshold
+          ) {
             px[i+3] = 0;
           }
         }

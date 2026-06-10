@@ -58,8 +58,16 @@ export class SpritePlayer {
     const ctx = canvas.getContext('2d');
     const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imgData.data;
+    const key = { r: data[0], g: data[1], b: data[2] };
+    const tolerance = 6;
     for (let i = 0; i < data.length; i += 4) {
-      if (data[i] < 30 && data[i + 1] < 30 && data[i + 2] < 30) data[i + 3] = 0;
+      if (
+        Math.abs(data[i] - key.r) <= tolerance &&
+        Math.abs(data[i + 1] - key.g) <= tolerance &&
+        Math.abs(data[i + 2] - key.b) <= tolerance
+      ) {
+        data[i + 3] = 0;
+      }
     }
     ctx.putImageData(imgData, 0, 0);
   }

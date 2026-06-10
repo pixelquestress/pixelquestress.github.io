@@ -9,6 +9,11 @@ export class EncounterSystem {
   }
 
   checkEnemyEncounter(gridX, gridY) {
+    if (this.game.level && !this.game.level.isDangerousForestTile(gridX, gridY)) {
+      this._chanceCounter = 0;
+      return false;
+    }
+
     // Random encounter check: emulate CBattleEngine::EngageCombat
     // Called after grid change; guarantees at least a few safe steps.
     const r = Math.floor(Math.random() * 90) + 1; // 1 - 90
@@ -19,7 +24,7 @@ export class EncounterSystem {
       if (enemies && enemies.length > 0) {
         // Use the game's startBattle so the cinematic transition and input lock run
         if (this.game && typeof this.game.startBattle === 'function') {
-          this.game.startBattle(enemies);
+          this.game.startBattle(enemies, { area: 'FOREST', battleBackground: 'cryn/graphics/forest.bmp' });
         } else {
           this.game.battleSystem.startBattle(enemies);
         }
@@ -66,34 +71,45 @@ export class EncounterSystem {
     else count = 1;
 
     const choices = [
-      { name: 'Spider', bmp: 'cryn/graphics/spider.bmp', levelRange: [1,2] },
-      { name: 'Gremlin', bmp: 'cryn/graphics/gremlin.bmp', levelRange: [1,2] },
-      { name: 'Tree Ent', bmp: 'cryn/graphics/foresttreeent.bmp', levelRange: [1,2] },
-      { name: 'Trug', bmp: 'cryn/graphics/foresttrug.bmp', levelRange: [1,2] },
-      { name: 'Leorn', bmp: 'cryn/graphics/forestleorn.bmp', levelRange: [1,2] },
-      { name: 'Krinar', bmp: 'cryn/graphics/forestkrinar.bmp', levelRange: [1,2] },
-      { name: 'Grey Wolf', bmp: 'cryn/graphics/forestwolf.bmp', levelRange: [1,2] }
+      { name: 'Spider', bmp: 'cryn/graphics/spider.bmp', armor: 0, attack: 2 },
+      { name: 'Gremlin', bmp: 'cryn/graphics/gremlin.bmp', armor: 0, castRate: 5, attack: 3 },
+      { name: 'Tree Ent', bmp: 'cryn/graphics/foresttreeent.bmp', armor: 9, attack: 4 },
+      { name: 'Trug', bmp: 'cryn/graphics/foresttrug.bmp', armor: 10, attack: 3 },
+      { name: 'Leorn', bmp: 'cryn/graphics/forestleorn.bmp', armor: 45, attack: 4 },
+      { name: 'Krinar', bmp: 'cryn/graphics/forestkrinar.bmp', armor: 0, castRate: 5, attack: 3 },
+      { name: 'Grey Wolf', bmp: 'cryn/graphics/forestwolf.bmp', armor: 9, attack: 4 }
     ];
 
     const picked = [];
     for (let i=0;i<count;i++) {
       const idx = Math.floor(Math.random() * choices.length);
       const c = choices[idx];
-      const level = Math.floor(Math.random() * (c.levelRange[1] - c.levelRange[0] + 1)) + c.levelRange[0];
+      const level = Math.floor(Math.random() * 2) + 1;
       // build an enemy descriptor used by battle system
       picked.push({
         name: c.name,
-        level: level,
-        maxHp: Math.max(8, 8 + level * 6),
-        hp: 0, // will be set by battle system
-        attack: Math.max(2, level + 1),
-        defense: Math.max(0, Math.floor(level/1.5)),
+        level,
+        maxHp: this.roll(level, level, level * 2 + level - 1),
+        hp: 0,
+        maxMp: this.roll(level, 4, 8),
+        mp: 0,
+        attack: c.attack,
+        defense: Math.max(0, Math.round((c.armor || level) / 12)),
+        spellCaster: c.castRate || 0,
         xpReward: 20 + level * 10,
-        goldReward: 5 + level * 5,
+        goldReward: this.roll(level, 0, 14),
         bmp: c.bmp
       });
     }
 
     return picked;
+  }
+
+  roll(times, min, max) {
+    let total = 0;
+    for (let i = 0; i < times; i++) {
+      total += Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+    return total;
   }
 }

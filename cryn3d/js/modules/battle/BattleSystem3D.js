@@ -14,9 +14,13 @@ export class BattleSystem3D extends EventEmitter {
     this.turn = 'player';
     this.inBattle = false;
     this.battleLog = [];
+    this.options = {};
+    this.originalEnemies = [];
   }
 
-  startBattle(enemy) {
+  startBattle(enemy, options = {}) {
+    this.options = options || {};
+    this.actorName = this.options.actorName || 'Cryn';
     // Initialize battle state. Accept either a single enemy descriptor or an array of enemies
     if (Array.isArray(enemy)) {
       this.enemies = enemy.map(e => Object.assign({}, e));
@@ -41,6 +45,7 @@ export class BattleSystem3D extends EventEmitter {
       this.emit('battleStart', this.enemy);
       this.log(`A wild ${this.enemy.name || 'enemy'} appears!`);
     }
+    this.originalEnemies = this.enemies.map(e => Object.assign({}, e));
 
     // Set battle flags
     this.inBattle = true;
@@ -60,7 +65,14 @@ export class BattleSystem3D extends EventEmitter {
 
   endBattle(victory) {
     this.inBattle = false;
-    this.emit('battleEnd', { victory, enemy: this.enemy });
+    this.emit('battleEnd', {
+      victory,
+      enemy: this.enemy,
+      enemies: this.originalEnemies,
+      boss: !!this.options.boss,
+      scripted: this.options.scripted || null,
+      fled: !victory && this.options.fled === true,
+    });
   }
 
   gainRewards() {
@@ -80,9 +92,14 @@ export class BattleSystem3D extends EventEmitter {
     const base = this.player.attack - Math.floor((target.defense || 0) / 2);
     let damage = Math.max(1, base + Math.floor(Math.random() * 4));
     if (Math.random() < 0.08) { damage = Math.floor(damage * 1.75); this.log('<span class="magic">Critical hit!</span>'); }
+    if (this.player.bonusAttack && Math.random() < 0.25) {
+      const bonus = Math.floor(Math.random() * 4) + this.player.level;
+      damage += bonus;
+      this.log(`<span class="magic">Bonus attack!</span> +${bonus} damage.`);
+    }
     target.hp -= damage;
     this.turn = 'enemy';
-    this.log(`You attack ${target.name || 'the enemy'} for <span class="damage">${damage}</span> damage!`);
+    this.log(`${this.actorName} attacks ${target.name || 'the enemy'} for <span class="damage">${damage}</span> damage!`);
     this.emit('attack', { damage, targetIndex: this.selectedIndex });
 
     // Update UI so HP bars reflect damage
@@ -125,18 +142,23 @@ export class BattleSystem3D extends EventEmitter {
     if (!this.inBattle || this.turn !== 'player') return;
     const target = this.enemy || (this.enemies && this.enemies[this.selectedIndex]);
     if (!target) return;
-    const mpCost = UI.MP_COST;
+    const spellName = this.player.level >= 10 ? 'Magic Explosion' : 'Magic Missile';
+    const mpCost = this.player.level >= 10 ? 10 : 2;
     if (this.player.mp < mpCost) {
       this.log('Not enough MP!');
       return;
     }
 
     this.player.mp -= mpCost;
-    const damage = Math.floor(this.player.attack * 1.5) + Math.floor(Math.random() * 4) + 2;
+    const spellLevel = Math.max(1, Math.min(this.player.level, this.player.level >= 10 ? 11 : 4));
+    let damage = 0;
+    for (let i = 0; i < spellLevel; i++) {
+      damage += Math.floor(Math.random() * 6) + 7;
+    }
     target.hp -= damage;
     this.turn = 'enemy';
-    this.log(`<span class="magic">Fireball</span> hits ${target.name || 'the enemy'} for <span class="damage">${damage}</span> damage!`);
-    this.emit('magic', { damage, targetIndex: this.selectedIndex });
+    this.log(`${this.actorName} casts <span class="magic">${spellName}</span> on ${target.name || 'the enemy'} for <span class="damage">${damage}</span> damage!`);
+    this.emit('magic', { damage, targetIndex: this.selectedIndex, spell: spellName });
 
     // Update UI
     this.updateUI();
@@ -178,7 +200,7 @@ export class BattleSystem3D extends EventEmitter {
     const hpRestore = Math.floor(this.player.maxHp * 0.3);
     this.player.hp = Math.min(this.player.maxHp, this.player.hp + hpRestore);
     this.turn = 'enemy';
-    this.log(`Used potion. Restored <span class="heal">${hpRestore} HP</span>. (${this.player.inventory.potions} left)`);
+    this.log(`${this.actorName} used a potion. Restored <span class="heal">${hpRestore} HP</span>. (${this.player.inventory.potions} left)`);
     this.emit('item', { type: 'potion', amount: hpRestore });
 
     // Update UI
@@ -190,8 +212,16 @@ export class BattleSystem3D extends EventEmitter {
   flee() {
     if (!this.inBattle || this.turn !== 'player') return;
 
+    if (this.options.boss) {
+      this.log("You can't get away this time!");
+      this.turn = 'enemy';
+      setTimeout(() => this.enemyTurn(), 800);
+      return;
+    }
+
     if (Math.random() < 0.5) {
       this.log('Fled successfully!');
+      this.options.fled = true;
       this.endBattle(false);
     } else {
       this.log('Could not flee!');
@@ -226,6 +256,19 @@ export class BattleSystem3D extends EventEmitter {
       }
       const actorEntry = alive[i++];
       const actor = actorEntry.e;
+      const spell = this.chooseMonsterSpell(actor);
+      if (spell) {
+        this.castMonsterSpell(actor, actorEntry.idx, spell);
+        if (this.player.hp <= 0) {
+          this.player.hp = 0;
+          this.player.alive = false;
+          this.endBattle(false);
+          return;
+        }
+        setTimeout(processNext, 350);
+        return;
+      }
+
       const base = (actor.attack || 2) - (this.player.defense || 0);
       let damage = Math.max(1, base + Math.floor(Math.random() * 4) - 1);
       if (Math.random() < 0.05) { damage = Math.floor(damage * 1.5); this.log(`${actor.name} lands a <span class="magic">crushing blow</span>!`); }
@@ -280,5 +323,37 @@ export class BattleSystem3D extends EventEmitter {
 
     const mpCostEl = document.getElementById('mp-cost');
     if (mpCostEl) mpCostEl.textContent = UI.MP_COST;
+    const magicButton = document.getElementById('btn-magic');
+    if (magicButton) magicButton.textContent = `Magic (${this.player.level >= 10 ? 10 : 2})`;
+  }
+
+  chooseMonsterSpell(actor) {
+    if (!actor || !actor.spellCaster || !actor.mp) return null;
+    const roll = Math.floor(Math.random() * (10 + actor.spellCaster));
+    if (roll >= actor.spellCaster) return null;
+    if ((actor.name === 'Lineer' || actor.name === 'King Tree Ent') && actor.mp >= 2) return 'Darkness';
+    if (actor.mp >= 2) return actor.level >= 10 ? 'Magic Explosion' : 'Magic Missile';
+    return null;
+  }
+
+  castMonsterSpell(actor, actorIndex, spell) {
+    let mpCost = 2;
+    let damage = 0;
+    if (spell === 'Darkness') {
+      actor.mp -= mpCost;
+      this.log(`${actor.name} casts <span class="magic">Darkness</span>. Your vision blurs.`);
+      damage = Math.max(1, actor.level);
+    } else {
+      mpCost = spell === 'Magic Explosion' ? 10 : 2;
+      actor.mp -= mpCost;
+      const spellLevel = spell === 'Magic Explosion' ? Math.min(actor.level, 11) : Math.min(actor.level, 4);
+      for (let i = 0; i < spellLevel; i++) {
+        damage += Math.floor(Math.random() * 6) + 7;
+      }
+      this.log(`${actor.name} casts <span class="magic">${spell}</span> for <span class="damage">${damage}</span> damage!`);
+    }
+    this.player.hp -= damage;
+    this.emit('magic', { damage, target: 'player', attackerIndex: actorIndex, spell });
+    this.updateUI();
   }
 }

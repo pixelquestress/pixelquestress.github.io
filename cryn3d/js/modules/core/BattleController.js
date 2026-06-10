@@ -15,6 +15,11 @@ export class BattleController {
     try { console.clear(); } catch (e) {}
     this.game.ui.showBattlePanel(true);
     this.game.battleSystem.updateUI();
+    // Update battle panel title to show active actor (Cryn or Beorne)
+    try {
+      const titleEl = document.querySelector('#battle-panel h3');
+      if (titleEl) titleEl.textContent = this.game.battleSystem.actorName || 'Battle!';
+    } catch (e) {}
     // audio handled by game.startBattle (keeps responsibility there)
   }
 
@@ -24,7 +29,9 @@ export class BattleController {
     if (!result.victory) {
       this.game.showMessage('You were defeated! Refresh to try again.');
     } else {
-      const enemy = this.game.battleSystem.enemy;
+      const enemy = result && result.enemies && result.enemies.length
+        ? result.enemies[0]
+        : this.game.battleSystem.enemy;
       if (enemy) {
         enemy.alive = false;
         if (enemy.mesh) enemy.mesh.visible = false;

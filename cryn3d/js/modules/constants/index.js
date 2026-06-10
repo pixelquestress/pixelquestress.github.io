@@ -65,7 +65,7 @@ export const COLORS = {
 };
 
 export const UI = {
-  MP_COST: 3,
+  MP_COST: 2,
   WALKABLE_TILES_3D: new Set(['0,1', '1,8', '1,9', '2,0', '2,1', '3,1']),
   TORCH_CHARS: ['z', '0', '1', '2', '9'],
 };
