@@ -1,0 +1,1285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>CRYN: The Dark Reflection — Web Tale</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { width:100%; height:100%; background:#050508; overflow:hidden; font-family:'Courier New',monospace; }
+  #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:radial-gradient(ellipse at center,#0b0b16 0%,#050508 70%); }
+  #stage { position:relative; }
+  canvas { image-rendering:pixelated; image-rendering:crisp-edges; background:#000; display:block;
+           box-shadow:0 0 60px rgba(120,40,160,.25), 0 0 140px rgba(40,20,80,.35); border:1px solid #2a2a3a; }
+  #touch { position:absolute; inset:0; pointer-events:none; display:none; }
+  #touch.on { display:block; }
+  .tbtn { position:absolute; pointer-events:auto; background:rgba(120,120,180,.10); border:1px solid rgba(150,150,220,.35);
+          border-radius:10px; color:#cfd; font-size:20px; display:flex; align-items:center; justify-content:center;
+          user-select:none; touch-action:none; font-family:inherit; }
+  .tbtn:active { background:rgba(150,150,220,.3); }
+  #dpad { left:10px; bottom:10px; width:132px; height:132px; position:absolute; pointer-events:none; }
+  #dpad .tbtn { width:44px; height:44px; }
+  #btnA { right:14px; bottom:64px; width:64px; height:64px; border-radius:50%; }
+  #btnB { right:86px; bottom:18px; width:56px; height:56px; border-radius:50%; }
+  #btnM { right:14px; top:10px; width:44px; height:34px; font-size:13px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="game" width="512" height="288"></canvas>
+    <div id="touch">
+      <div id="dpad">
+        <div class="tbtn" data-k="up" style="left:44px;top:0;">▲</div>
+        <div class="tbtn" data-k="left" style="left:0;top:44px;">◀</div>
+        <div class="tbtn" data-k="right" style="left:88px;top:44px;">▶</div>
+        <div class="tbtn" data-k="down" style="left:44px;top:88px;">▼</div>
+      </div>
+      <div class="tbtn" id="btnA" data-k="ta">A</div>
+      <div class="tbtn" id="btnB" data-k="tb">B</div>
+      <div class="tbtn" id="btnM" data-k="m">♪</div>
+    </div>
+  </div>
+</div>
+<script>
+'use strict';
+/* =====================================================================
+   CRYN: THE DARK REFLECTION — Web Tale
+   A compact tribute reimagining of "Cryn - The Dark Reflection"
+   (pixelquestress/cryn). Story beats, dialog, spells, monsters and the
+   turn-based battle system are adapted from the original.
+   ===================================================================== */
+
+// ---------------- utils ----------------
+const clamp=(v,a,b)=>v<a?a:(v>b?b:v);
+const rnd=(a,b)=>Math.floor(Math.random()*(b-a+1))+a;
+const chance=p=>Math.random()<p;
+const $=id=>document.getElementById(id);
+
+// ---------------- canvas ----------------
+const cv=$('game'), ctx=cv.getContext('2d');
+ctx.imageSmoothingEnabled=false;
+const TILE=16, VW=32, VH=18, W=512, H=288;
+function fitScreen(){
+  const s=Math.min(innerWidth/W, innerHeight/H);
+  cv.style.width=(W*Math.floor(s*2)/2)+'px';
+  cv.style.height=(H*Math.floor(s*2)/2)+'px';
+}
+addEventListener('resize',fitScreen); fitScreen();
+if('ontouchstart' in window) $('touch').classList.add('on');
+
+// ---------------- audio (tiny synth) ----------------
+let AC=null, muted=false, musicTimer=null, musicMode=null;
+function ac(){ if(!AC){ AC=new (window.AudioContext||window.webkitAudioContext)(); } if(AC.state==='suspended')AC.resume(); return AC; }
+function tone(f,dur,type,vol,slide){
+  if(muted) return; try{
+    const a=ac(),o=a.createOscillator(),g=a.createGain();
+    o.type=type||'square'; o.frequency.value=f;
+    if(slide) o.frequency.exponentialRampToValueAtTime(Math.max(20,slide),a.currentTime+dur);
+    g.gain.setValueAtTime(vol||0.08,a.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001,a.currentTime+dur);
+    o.connect(g); g.connect(a.destination); o.start(); o.stop(a.currentTime+dur);
+  }catch(e){}
+}
+function noiseS(dur,vol){
+  if(muted) return; try{
+    const a=ac(),n=a.sampleRate*dur,b=a.createBuffer(1,n,a.sampleRate),d=b.getChannelData(0);
+    for(let i=0;i<n;i++)d[i]=(Math.random()*2-1)*(1-i/n);
+    const s=a.createBufferSource(),g=a.createGain(); s.buffer=b; g.gain.value=vol||0.1;
+    s.connect(g); g.connect(a.destination); s.start();
+  }catch(e){}
+}
+const sfx={
+  move(){ tone(220,0.03,'square',0.02); },
+  talk(){ tone(660,0.06,'square',0.05); tone(880,0.08,'square',0.04); },
+  select(){ tone(520,0.05,'square',0.06); },
+  back(){ tone(330,0.06,'square',0.05); },
+  hit(){ noiseS(0.12,0.12); tone(140,0.1,'sawtooth',0.08,60); },
+  crit(){ noiseS(0.2,0.16); tone(200,0.18,'sawtooth',0.1,50); },
+  magic(){ tone(880,0.25,'sine',0.07,220); },
+  heal(){ tone(520,0.12,'sine',0.07,1040); },
+  level(){ [523,659,784,1046].forEach((f,i)=>setTimeout(()=>tone(f,0.15,'square',0.07),i*90)); },
+  chest(){ [392,523,659].forEach((f,i)=>setTimeout(()=>tone(f,0.12,'triangle',0.07),i*70)); },
+  save(){ [659,784,1046,1318].forEach((f,i)=>setTimeout(()=>tone(f,0.2,'sine',0.06),i*110)); },
+  hurt(){ tone(180,0.15,'sawtooth',0.09,90); },
+  die(){ tone(300,0.5,'sawtooth',0.09,40); },
+  roar(){ tone(90,0.5,'sawtooth',0.12,45); noiseS(0.4,0.1); },
+  step(){ tone(180,0.02,'square',0.015); },
+};
+// simple step-sequencer BGM
+const SONGS={
+  title:  {bpm:96, bass:[110,0,110,0,130.8,0,98,0], lead:[220,0,261.6,293.7, 0,246.9,220,0]},
+  castle: {bpm:80, bass:[87.3,0,87.3,0,103.8,0,82.4,0], lead:[174.6,0,207.7,0, 0,196,174.6,0]},
+  forest: {bpm:104,bass:[98,0,123.5,0,98,0,146.8,130.8], lead:[196,246.9,293.7,246.9, 196,0,220,246.9]},
+  cave:   {bpm:88, bass:[73.4,73.4,0,65.4,0,73.4,0,61.7], lead:[0,146.8,0,138.6, 0,130.8,0,123.5]},
+  nether: {bpm:120,bass:[55,55,65.4,55, 55,55,73.4,65.4], lead:[110,0,130.8,0, 146.8,0,130.8,116.5]},
+  battle: {bpm:150,bass:[110,110,130.8,110, 98,98,123.5,130.8], lead:[220,261.6,293.7,261.6, 246.9,293.7,329.6,293.7]},
+  boss:   {bpm:165,bass:[82.4,82.4,98,82.4, 73.4,73.4,87.3,98], lead:[164.8,196,246.9,196, 174.6,196,220,246.9]},
+};
+function playMusic(name){
+  if(musicMode===name) return; stopMusic(); musicMode=name;
+  if(!name||muted) return;
+  const s=SONGS[name]; if(!s) return;
+  let step=0;
+  const tick=()=>{
+    if(musicMode!==name) return;
+    if(!muted){ try{
+      const a=ac(),t=a.currentTime;
+      const bf=s.bass[step%s.bass.length], lf=s.lead[step%s.lead.length];
+      if(bf){ const o=a.createOscillator(),g=a.createGain(); o.type='triangle'; o.frequency.value=bf;
+        g.gain.setValueAtTime(0.06,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.22);
+        o.connect(g);g.connect(a.destination); o.start(t); o.stop(t+0.24); }
+      if(lf && step%2===0){ const o=a.createOscillator(),g=a.createGain(); o.type='square'; o.frequency.value=lf;
+        g.gain.setValueAtTime(0.025,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.3);
+        o.connect(g);g.connect(a.destination); o.start(t); o.stop(t+0.32); }
+    }catch(e){} }
+    step++; musicTimer=setTimeout(tick, 60000/s.bpm/2);
+  }; tick();
+}
+function stopMusic(){ musicMode=null; if(musicTimer){clearTimeout(musicTimer); musicTimer=null;} }
+
+// ---------------- input ----------------
+const keys={};
+const pressed={};
+addEventListener('keydown',e=>{
+  const k=e.key.toLowerCase();
+  if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k===' '?' ':k)) e.preventDefault();
+  if(!keys[k]) pressed[k]=true;
+  keys[k]=true;
+});
+addEventListener('keyup',e=>{ keys[e.key.toLowerCase()]=false; });
+function clearPressed(){ for(const k in pressed) pressed[k]=false; }
+// touch buttons
+document.querySelectorAll('.tbtn').forEach(b=>{
+  const k=b.dataset.k;
+  const dn=e=>{ e.preventDefault(); if(!keys[k])pressed[k]=true; keys[k]=true; };
+  const up=e=>{ e.preventDefault(); keys[k]=false; };
+  b.addEventListener('touchstart',dn,{passive:false}); b.addEventListener('touchend',up);
+  b.addEventListener('mousedown',dn); b.addEventListener('mouseup',up); b.addEventListener('mouseleave',()=>keys[k]=false);
+});
+function dirHeld(){
+  if(keys['arrowup']||keys['w']||keys['up'])return 'up';
+  if(keys['arrowdown']||keys['s']||keys['down'])return 'down';
+  if(keys['arrowleft']||keys['a']||keys['left'])return 'left';
+  if(keys['arrowright']||keys['d']||keys['right'])return 'right';
+  return null;
+}
+function btnA(){ return pressed[' ']||pressed['enter']||pressed['ta']; }
+function btnB(){ return pressed['escape']||pressed['tb']; }
+
+// ==================== SPRITES ====================
+const PAL={K:'#0b0b14',W:'#f2f2f2',R:'#e23b3b',r:'#8f1d1d',B:'#3f7fe0',b:'#1d3f7d',G:'#41b04f',g:'#1e5c28',
+Y:'#f2d13d',O:'#e0912c',P:'#a05ce0',p:'#5c2d86',S:'#f0c8a0',s:'#a87c50',T:'#45c8d0',t:'#1e7d84',
+V:'#c9ced8',v:'#5f646f',N:'#8a5f2e',n:'#4a2f16',D:'#3b2d5c',d:'#241b3a',L:'#7de0e6',M:'#e06ab0'};
+function makeSprite(rows){
+  const c=document.createElement('canvas'); c.width=16; c.height=16;
+  const g=c.getContext('2d');
+  rows.forEach((row,y)=>{ [...row].forEach((ch,x)=>{
+    if(ch==='.'||ch===' ')return; g.fillStyle=PAL[ch]||'#f0f'; g.fillRect(x,y,1,1);
+  });});
+  return c;
+}
+// ---- heroes / npcs (16x16) ----
+const SPR={};
+SPR.cryn=makeSprite([
+'................','.....bbb........','....bBBBb.......','....bSBSb.......',
+'....bSSSb.......','.....sSs........','....bBBBb.......','...bBBBBb.......',
+'...bBBbBBb......','...sBBBBs.......','...sBBBBs..N....','....BBBB...N....',
+'....b..b...N....','....n..n....N...','....n..n........','....n..n........']);
+SPR.beorne=makeSprite([
+'................','.....rrr........','....rRRRr.......','....rSKSr.......',
+'....rSSSr.......','.....sKs........','....rRRRr.......','...rRRRRr.......',
+'..VrRRRRRrV.....','..VsRRRRRsV..N..','...sRRRRs..NN...','....RRRR...N....',
+'....r..r....N...','....n..n........','....n..n........','....KKK.........']);
+SPR.beorneDemon=makeSprite([
+'..R..........R..','..R..rrr.....R..','.....rRRRr.......','....rRKRr.......',
+'....rRKRR.......','.....sKs........','....rRRRr.......','...rRRRRr.......',
+'..RrRRRRRrR.....','..RsRRRRRsR..N..','...sRRRRs..NN...','....RRRR...N....',
+'....r..r....N...','....n..n........','....n..n........','....KKK.........']);
+SPR.king=makeSprite([
+'................','......YYY.......','.....YWWWY......','.....YSYSY......',
+'.....YSSSY......','......sSs.......','.....WWWWW......','....WWYWYW......',
+'....WWYWYWW.....','....sWWWWWs.....','....sWWWWWs.....','....WWWWWW......',
+'....WwwwwW......','....n....n......','....n....n......','...YYY..YYY.....']);
+SPR.ayli=makeSprite([
+'................','.....ttt........','....tTTTt.......','....tSTSt.......',
+'....tSSSt.......','.....sSs........','....tTTTt.......','...tTTTTt...V...',
+'...tTTTTt...VV..','...sTTTTs..VV...','...sTTTTs........','....TTTT........',
+'....t..t........','....n..n........','....n..n........','...VV..VV.......']);
+SPR.narz=makeSprite([
+'..P..........P..','..PpPPPPPPPPpP..','...pPPPPPPPPp...','...pPKSKS Pp...',
+'...pPPPPPPpp....','....pPssPp.......','...ppPPPPpp.....','..ppPPPPPPpp....',
+'..ppPpPPpPpp....','..spPPPPPPps....','..spPpPPpPps....','...pPPPPPPp.....',
+'...pp....pp.....','...nn....nn.....','...nn....nn.....','..nnn....nnn....']);
+SPR.rii=makeSprite([
+'................','................','................','.....NN.........',
+'....NNNNNN......','...NNnnNNNN.....','...NnNNNNnN.....','...NNNNNNN......',
+'....NNnnNNN.....','....NNNNNN......','.....N..N.......','.....n..n.......',
+'................','................','................','................']);
+SPR.treeent=makeSprite([
+'.....gggg.......','....gGGGg.......','...gGGGGGg......','...gGKSKGg......',
+'...gGGGGGg..g...','....gGGGg..gg...','....nnnnn.......','....nnNnn.......',
+'....nNNNnn......','....nNNNnn......','....nNNNnn......','....nNNNnn......',
+'....nNNNnn......','...nnNNNnnn.....','...n..n..n......','................']);
+SPR.poolguard=makeSprite([
+'................','.....BBBB.......','....BBBBBB......','....BKSKSB......',
+'....BBBBBB......','.....BssB.......','...BBBBBBB......','..BBBBBBBBB.....',
+'..BBbBBBBbBB....','..BsBBBBBBsB....','...BBBBBBB......','....BBBBB.......',
+'....B.B.B.......','................','................','................']);
+SPR.possession=makeSprite([
+'................','.....KKK........','....KKKKK.......','....KRKRK.......',
+'....KKKKK.......','.....KKK........','....KKKKK.......','...KKKKKKK......',
+'...KKK KKK......','...KKKKKKK......','....KKKKK.......','....K.K.K.......',
+'................','................','................','................']);
+SPR.neacres=makeSprite([
+'................','.....ddd........','....dDDDd.......','....dSDSd.......',
+'....dSSSd.......','.....sds........','....dDDDd.......','...dDDDDd.......',
+'...dDDDDDd......','...sDDDDDs......','...sDDDDDs..P...','....DDDDD...P...',
+'....d...d.......','....n...n.......','....n...n.......','................']);
+SPR.soldier=makeSprite([
+'................','.....VVV........','....VVVVV.......','....VSVSV.......',
+'....VSSSV.......','.....sVs........','....VVVVV.......','...VVVVVVV......',
+'..SVVVVVVVS.....','..SsVVVVVSs.....','...sVVVVVs......','....VVVVV.......',
+'....V...V.......','....n...n.......','....n...n.......','...VV...VV......']);
+SPR.gremlin=makeSprite([
+'................','................','..g........g....','..gg......gg....','...gGGGGGGg.....','...gGYKYGg......','...gGGGGGGg.....','....gGGGGg......','....gGGGGg......','.....GGGG.......','.....g..g.......','.....n..n.......','................','................','................','................']);
+SPR.bat=makeSprite([
+'................','................','.bb........bb...','.bBb......bBb...','..bBbb..bBbb....','...bBBBBBBb.....','...bBKBBKBb.....','....bBBBBb......','.....bRRb.......','.....bBBb.......','................','................','................','................','................','................']);
+SPR.wolf=makeSprite([
+'................','................','...v......v.....','...vv....vv.....','...vVVVVVVv.....','...vVKWKVv......','...vVVVVVVv.....','....vVVVVv......','....vVnnVv......','.....vnnv.......','.....n..n.......','................','................','................','................','................']);
+SPR.spider=makeSprite([
+'................','................','..d..d..d..d....','...d.d..d.d.....','....dDDDDd......','...DDDDDDDD.....','...DKDDDKDd.....','...DDDDDDDD.....','....DDDDDD......','..d.DDDD.D.d....','.d..d..d..d..d..','................','................','................','................','................']);
+SPR.chigger=makeSprite([
+'................','................','................','................','................','.....RRRR.......','....RRRRRR......','....RKRKRK......','....RRRRRR......','.....RRRR.......','..r..r..r..r....','................','................','................','................','................']);
+SPR.trug=makeSprite([
+'................','................','....NNNNNN......','...NNNNNNNN.....','...NNKNNKNn.....','...NNNNNNNN.....','....NNNNNN......','...NNNNNNNN.....','..NNNNNNNNNN....','..NsNNNNNNsN....','...NNNNNNNN.....','....NN..NN......','....n....n......','................','................','................']);
+SPR.sloth=makeSprite([
+'................','....gggggg......','...gGGGGGGg.....','...gGKGKGg......','...gGGGGGGg.....','....gGGGGg......','.....gSSg.......','....ggSSgg......','...g.gSSg.g.....','......SS........','......ss........','................','................','................','................','................']);
+SPR.hound=makeSprite([
+'................','................','................','................','...rrr..........','..rRRRRr........','..rRKRRRr.......','..rRRRRRR.......','...RRRRRR.......','...RrrrrR.......','...r....r.......','...r....r.......','................','................','................','................']);
+SPR.mole=makeSprite([
+'................','................','................','................','....nnnn........','...nNNNNn.......','...nNKNnN.......','...nNNNNn..n....','....nNNn..nn....','....nnnn..nn....','................','................','................','................','................','................']);
+SPR.fly=makeSprite([
+'................','...VV....VV.....','..VVVV..VVVV....','..VVVVVVVVVV....','...VVTTTTVV.....','....TTTTTT......','....TTKTTK......','.....TTTT.......','.....tTTt.......','......tt........','................','................','................','................','................','................']);
+SPR.centipede=makeSprite([
+'................','................','................','................','..OOO...........','.OOOOOOOO.......','.OROOOOOOO......','.OOOOOOOOOO.....','..OOOOOOOOOO....','...v.v.v.v......','................','................','................','................','................','................']);
+SPR.netherbeast=makeSprite([
+'................','..d........d....','..dd......dd....','...dDDDDDDd.....','...dDKDKDd......','...dDDDDDD......','....dDDDDd......','...dDDDDDDd.....','..ddDDDDDDdd....','..d.dDDDDd.d....','.....d..d.......','................','................','................','................','................']);
+SPR.wyrm=makeSprite([
+'................','................','......BBBB......','.....BBBBBB.....','.....BKBKBb.....','.....BBBBBB.....','....BBBBBB......','...BBBBBB.......','...bBBBBb.......','....bBBb........','.....bb.........','................','................','................','................','................']);
+SPR.demonsoldier=makeSprite([
+'................','.....RRR........','....RRRRR.......','....RKRKR.......','....RRRRR.......','.....RRR........','....RRRRR.......','...RRRRRRR......','..RRRRRRRRR.....','..RsRRRRRsR.....','...RRRRRRR......','....RR.RR.......','....n...n.......','................','................','................']);
+SPR.statue=makeSprite([
+'................','.....vvv........','....vVVVv.......','....vRKRv.......',
+'....vVVVv.......','.....vVv........','....vVVVv.......','...vVVVVv.......',
+'...vVVVVVv......','...vvVVVvv......','...vvVVVvv......','...vvVVVvv......',
+'....vvvvv.......','...vvvvvvv......','................','................']);
+SPR.crystal=makeSprite([
+'................','.......L........','......LLL.......','......LLL.......',
+'.....LLLLL......','.....LLLLL......','......LLL.......','......LLL.......',
+'.....LLLLL......','....LLLLLLL.....','....vvLLLvv.....','.....vvvvv......',
+'......vvv.......','................','................','................']);
+SPR.chest=makeSprite([
+'................','................','................','................',
+'................','...NNNNNNNNN....','...NYYYYYYYN....','...NNNNNNNNN....',
+'...NnNNNNNnN....','...NnNYYYnN....','...NnNYYYnN....','...NnNNNNNnN....',
+'...NNNNNNNNN....','...NNNNNNNNN....','................','................']);
+SPR.chestOpen=makeSprite([
+'................','................','................','................',
+'................','...NNNNNNNNN....','................','................',
+'...NnNNNNNnN....','...NnNNNNNnN....','...NnNNNNNnN....','...NnNNNNNnN....',
+'...NNNNNNNNN....','...NNNNNNNNN....','................','................']);
+
+
+// ==================== TILES ====================
+function tileCanvas(fn){ const c=document.createElement('canvas'); c.width=16;c.height=16; fn(c.getContext('2d')); return c; }
+function speckle(g,colors,n){ for(let i=0;i<n;i++){ g.fillStyle=colors[rnd(0,colors.length-1)]; g.fillRect(rnd(0,15),rnd(0,15),1,1);} }
+const TILES={};
+TILES.grass=tileCanvas(g=>{ g.fillStyle='#2d7a35';g.fillRect(0,0,16,16); speckle(g,['#35963f','#276b2e','#3fae4a'],40); });
+TILES.tallgrass=tileCanvas(g=>{ g.fillStyle='#2d7a35';g.fillRect(0,0,16,16); speckle(g,['#35963f','#276b2e'],25);
+  g.fillStyle='#1e5c28'; for(let i=0;i<6;i++){const x=rnd(1,14); g.fillRect(x,10,1,5); g.fillRect(x-1,12,3,1);} });
+TILES.tree=tileCanvas(g=>{ g.fillStyle='#2d7a35';g.fillRect(0,0,16,16); speckle(g,['#35963f','#276b2e'],20);
+  g.fillStyle='#4a2f16'; g.fillRect(7,10,2,6); g.fillStyle='#1e5c28';
+  g.fillRect(3,2,10,8); g.fillRect(5,0,6,3); g.fillStyle='#35963f'; g.fillRect(4,3,4,3); });
+TILES.pine=tileCanvas(g=>{ g.fillStyle='#245c2c';g.fillRect(0,0,16,16); speckle(g,['#2d7a35','#1e4a24'],20);
+  g.fillStyle='#3a2410'; g.fillRect(7,11,2,5); g.fillStyle='#1e4a24';
+  g.fillRect(6,8,4,4); g.fillRect(5,4,6,5); g.fillRect(6,1,4,4); });
+TILES.path=tileCanvas(g=>{ g.fillStyle='#9a7f4e';g.fillRect(0,0,16,16); speckle(g,['#8a6f42','#a8925e'],35); });
+TILES.footE=tileCanvas(g=>{ g.fillStyle='#2d7a35';g.fillRect(0,0,16,16); speckle(g,['#35963f','#276b2e'],20);
+  g.fillStyle='#c9b183';
+  g.fillRect(2,6,5,4); g.fillRect(8,4,2,2); g.fillRect(9,7,2,2); g.fillRect(8,10,2,2); });
+TILES.flower=tileCanvas(g=>{ g.fillStyle='#2d7a35';g.fillRect(0,0,16,16); speckle(g,['#35963f','#276b2e'],25);
+  g.fillStyle='#e06ab0'; g.fillRect(4,5,2,2); g.fillStyle='#f2d13d'; g.fillRect(11,10,2,2); g.fillStyle='#f2f2f2'; g.fillRect(7,12,1,2); });
+TILES.cwall=tileCanvas(g=>{ g.fillStyle='#6f7480';g.fillRect(0,0,16,16); g.fillStyle='#565b66';
+  g.fillRect(0,7,16,2); g.fillRect(7,0,2,7); g.fillRect(3,9,2,7); g.fillRect(11,9,2,7); speckle(g,['#7d828e'],15); });
+TILES.cfloor=tileCanvas(g=>{ g.fillStyle='#8b90a0';g.fillRect(0,0,16,16); g.fillStyle='#7a7f8e';
+  g.fillRect(0,0,16,1); g.fillRect(0,0,1,16); speckle(g,['#9aa0ae'],12); });
+TILES.carpet=tileCanvas(g=>{ g.fillStyle='#8f1d1d';g.fillRect(0,0,16,16); g.fillStyle='#a52a2a';
+  g.fillRect(2,0,12,16); g.fillStyle='#d4af37'; g.fillRect(2,0,1,16); g.fillRect(13,0,1,16); });
+TILES.throne=tileCanvas(g=>{ g.fillStyle='#8b90a0';g.fillRect(0,0,16,16); g.fillStyle='#d4af37';
+  g.fillRect(4,2,8,10); g.fillStyle='#8f1d1d'; g.fillRect(6,4,4,6); g.fillStyle='#f2d13d'; g.fillRect(7,0,2,3); });
+TILES.wood=tileCanvas(g=>{ g.fillStyle='#6b4a26';g.fillRect(0,0,16,16); g.fillStyle='#5a3c1e';
+  for(let y=3;y<16;y+=4)g.fillRect(0,y,16,1); speckle(g,['#7a5630'],15); });
+TILES.cavefloor=tileCanvas(g=>{ g.fillStyle='#3a3a44';g.fillRect(0,0,16,16); speckle(g,['#2e2e38','#46464f'],40); });
+TILES.cavewall=tileCanvas(g=>{ g.fillStyle='#23232c';g.fillRect(0,0,16,16); g.fillStyle='#2e2e3a';
+  g.fillRect(0,5,16,3); g.fillRect(5,0,3,5); g.fillRect(10,8,3,8); speckle(g,['#1a1a22'],15); });
+TILES.water=tileCanvas(g=>{ g.fillStyle='#1d4f8f';g.fillRect(0,0,16,16); g.fillStyle='#2a6ab5';
+  g.fillRect(2,4,5,2); g.fillRect(9,10,5,2); speckle(g,['#3f8fe0'],12); });
+TILES.bonewall=tileCanvas(g=>{ g.fillStyle='#4a4438';g.fillRect(0,0,16,16); g.fillStyle='#cfc4a8';
+  g.fillRect(2,3,12,2); g.fillRect(2,11,12,2); g.fillRect(3,3,2,10); g.fillRect(11,3,2,10);
+  g.fillStyle='#efe8d0'; g.fillRect(6,6,4,4); });
+TILES.darkfloor=tileCanvas(g=>{ g.fillStyle='#241b3a';g.fillRect(0,0,16,16); speckle(g,['#2e2347','#1a1429'],40); });
+TILES.lava=tileCanvas(g=>{ g.fillStyle='#a52a00';g.fillRect(0,0,16,16); g.fillStyle='#e05a00';
+  g.fillRect(1,3,6,3); g.fillRect(9,9,6,4); g.fillStyle='#f2d13d'; g.fillRect(3,4,2,1); g.fillRect(11,10,2,2); });
+TILES.pillar=tileCanvas(g=>{ g.fillStyle='#8b90a0';g.fillRect(0,0,16,16); g.fillStyle='#6f7480';
+  g.fillRect(3,0,10,16); g.fillStyle='#9aa0ae'; g.fillRect(5,0,2,16); });
+TILES.door=tileCanvas(g=>{ g.fillStyle='#8b90a0';g.fillRect(0,0,16,16); g.fillStyle='#4a2f16';
+  g.fillRect(3,1,10,15); g.fillStyle='#6b4a26'; g.fillRect(5,3,6,11); g.fillStyle='#d4af37'; g.fillRect(11,8,2,2); });
+TILES.stairs=tileCanvas(g=>{ g.fillStyle='#1a1a22';g.fillRect(0,0,16,16); g.fillStyle='#3a3a44';
+  for(let i=0;i<4;i++)g.fillRect(2,2+i*3,12,1); });
+TILES.lever=tileCanvas(g=>{ g.fillStyle='#3a3a44';g.fillRect(0,0,16,16); g.fillStyle='#6f7480';
+  g.fillRect(6,8,4,8); g.fillStyle='#8f1d1d'; g.fillRect(7,2,2,7); g.fillStyle='#e23b3b'; g.fillRect(5,0,6,3); });
+TILES.altar=tileCanvas(g=>{ g.fillStyle='#241b3a';g.fillRect(0,0,16,16); g.fillStyle='#3b2d5c';
+  g.fillRect(2,6,12,8); g.fillStyle='#5c2d86'; g.fillRect(4,2,8,5); g.fillStyle='#a05ce0'; g.fillRect(6,3,4,2); });
+TILES.rubble=tileCanvas(g=>{ g.fillStyle='#5a5a64';g.fillRect(0,0,16,16); speckle(g,['#6f7480','#46464f'],30);
+  g.fillStyle='#3a3a44'; g.fillRect(3,4,4,3); g.fillRect(10,9,4,3); });
+TILES.scorch=tileCanvas(g=>{ g.fillStyle='#1e1a14';g.fillRect(0,0,16,16); speckle(g,['#2e2820','#0f0d0a'],40); });
+
+// ==================== MAPS ====================
+// legend: # solid | . base | , tallgrass | T tree | Y pine | P path | f flower
+//  H throne | E pillar | c carpet | C chest | V crystal(save) | W water | B bonewall
+//  L lava | X statue | 1 CAST lever | 2 BLOOD lever | A altar | S stairs
+//  r rubble | s scorch | o wood-floor accent
+const MAPS={
+castle:{name:'Castle Throne Room',music:'castle',solid:'cwall',enc:null,
+rows:[
+'##################',
+'#C......HH......V#',
+'#.......HH.......#',
+'#..E....cc....E..#',
+'#.......cc.......#',
+'#..E....cc....E..#',
+'#.......cc.......#',
+'#.......cc.......#',
+'#..E....cc....E..#',
+'#.......cc.......#',
+'#.......cc.......#',
+'#................#',
+'#########.########']},
+forest:{name:'Whispering Forest',music:'forest',solid:'tree',enc:['gremlin','bat','wolf','spider','chigger'],
+rows:[
+'##########################',
+'#TTTT..,,....TTTT....,,..#',
+'#TT,,,,,....TTTTT..,,,,..#',
+'#..,,,,,f....TTT....,,...#',
+'#..,,,,......f.....f.....#',
+'#...PPPPPPPPPPPPPPPPP....#',
+'#TT.PPP,,,,,,,,,,PPPPT...#',
+'#TT.PP..,,,,,,,,..PP.TT..#',
+'#...PP..,,,,,,,,..PP.....#',
+'....PP...,,,,,,...PP..f..#',
+'....PPPPPPPPPPPPPPPPP..T.#',
+'#...PP..f....,,.....PPTT.#',
+'#TT.PP......,,,,....PP...#',
+'#TT.PP..TT..,,,,..TTPP...#',
+'#...PP..TTT..,,...TT.PP>..',
+'#.f.PPPPPPPPPPPPPPPPPP....',
+'#...PP.....,,.......PP...#',
+'#TT.PP..f..,,,,..f..PP.TT#',
+'#TT......,,,,,,......TT..#',
+'#########.################']},
+tree:{name:'The Ancient Tree',music:'cave',solid:'tree',enc:['spider','sloth','trug'],
+rows:[
+'################',
+'#......XX......#',
+'#..C...XX...C..#',
+'#.TT...XX...TT.#',
+'#.TT...PP...TT.#',
+'#......PP......#',
+'#.TTT..PP..TTT.#',
+'#.TTT..PP..TTT.#',
+'#......PP......#',
+'#..TT..PP..TT..#',
+'#..TT..PP..TT..#',
+'#......PP......#',
+'#......PP......#',
+'########.#######']},
+ruins:{name:'Castle Ruins',music:'castle',solid:'cwall',enc:null,
+rows:[
+'#########.########',
+'#rr..s....s...rr.#',
+'#rs..s..s..s..sr.#',
+'#rr..s....s...rr.#',
+'#....s....s......#',
+'#..s......s...s..#',
+'#....s....s......#',
+'#..s....s....s...#',
+'#......s.....s...#',
+'#..rr..s...s..rr.#',
+'#..rr.......s.rr.#',
+'#......s.....V...#',
+'#########.########']},
+tunnels:{name:'Demon Tunnels',music:'cave',solid:'cavewall',enc:['hound','mole','fly','centipede'],
+rows:[
+'###########.##########',
+'#.........S..........#',
+'#....................#',
+'#.....WWWWWWW........#',
+'#.....WWWWWWW........#',
+'#.....WWWWWWW........#',
+'#....................#',
+'#....................#',
+'#........BBBBB.......#',
+'#....................#',
+'#....................#',
+'#..X..........1......#',
+'#....................#',
+'#.............2......#',
+'#....................#',
+'###########.##########']},
+nether:{name:'The Deep Nether',music:'nether',solid:'cavewall',enc:['netherbeast','wyrm','demonsoldier','trug'],
+rows:[
+'####################',
+'#LL..AAAAAA....LL..#',
+'#LL..AAAAAA....LL..#',
+'#..................#',
+'#.LL............LL.#',
+'#.LL............LL.#',
+'#..................#',
+'#..................#',
+'#..................#',
+'#.LL............LL.#',
+'#.LL............LL.#',
+'#..................#',
+'#....V.............#',
+'####################']},
+};
+// tile char -> tile key + walkable?
+const TILEDEF={
+ '#':{solid:true}, '.':{t:'base'}, ',':{t:'tallgrass',enc:true}, 'T':{t:'tree',solid:true},
+ 'Y':{t:'pine',solid:true}, 'P':{t:'path'}, 'f':{t:'flower'}, 'H':{t:'throne',solid:true},
+ 'E':{t:'pillar',solid:true}, 'c':{t:'carpet'}, 'C':{t:'cfloor',obj:'chest',solid:true}, 'V':{t:'cfloor',obj:'crystal',solid:true},
+ 'W':{t:'water',solid:true}, 'B':{t:'bonewall',solid:true,id:'bonewall'}, 'L':{t:'lava',solid:true},
+ 'X':{t:'cavefloor',obj:'statue',solid:true}, '1':{t:'cavefloor',obj:'lever1',solid:true}, '2':{t:'cavefloor',obj:'lever2',solid:true},
+ 'A':{t:'altar',solid:true}, 'S':{t:'stairs'}, 'r':{t:'rubble'}, 's':{t:'scorch'}, 'o':{t:'wood'},
+ '>':{t:'footE'},
+};
+
+// ==================== GAME STATE ====================
+const G={
+  state:'title', mapId:'', map:null, px:9, py:8, dir:'down', mx:0, my:0, // mx,my: pixel offset anim
+  moving:false, stepAcc:0, flags:{}, party:[], items:{potion:3,ether:1},
+  npcs:[], follower:null, trail:[], chests:{}, leverOrder:[],
+  camX:0, camY:0, playT:0, battlesWon:0, titleSel:0,
+};
+// ---------- spells (adapted from the original's 15+ spells) ----------
+const SPELLS={
+  missile:  {name:'Magic Missile', mp:2,  pow:16, type:'dmg'},
+  cure:     {name:'Cure',          mp:2,  pow:34, type:'heal'},
+  mindnumb: {name:'Mind Numb',     mp:3,  pow:0,  type:'debuff'},
+  lightshock:{name:'Light Shock',  mp:4,  pow:24, type:'dmg'},
+  fire:     {name:'Fire',          mp:6,  pow:36, type:'dmg'},
+  lightning:{name:'Lightning',     mp:8,  pow:46, type:'dmg'},
+  bioflare: {name:'Bio Flare',     mp:3,  pow:28, type:'dmg'},
+  holylight:{name:'Holy Light',    mp:13, pow:72, type:'dmg'},
+  inferno:  {name:'Inferno',       mp:10, pow:62, type:'dmg'},   // Fire evolves at Lv10
+  storm:    {name:'Stormcall',      mp:12, pow:78, type:'dmg'},   // Lightning evolves at Lv10
+};
+function newCryn(){ return {name:'Cryn',spr:'cryn',lv:3,xp:0,hp:60,maxhp:60,mp:26,maxmp:26,atk:11,def:7,spd:8,spells:['missile','cure','lightshock','fire'],alive:true}; }
+function newAyli(){ return {name:'Ayli',spr:'ayli',lv:4,xp:0,hp:62,maxhp:62,mp:20,maxmp:20,atk:13,def:7,spd:11,spells:['cure','lightshock'],alive:true}; }
+function xpNext(lv){ return lv*40; }
+function levelUp(h){
+  h.lv++; h.maxhp+=7; h.maxmp+=4; h.atk+=2; h.def+=1; h.spd+=1;
+  h.hp=Math.min(h.maxhp,h.hp+Math.floor(h.maxhp/2)); h.mp=Math.min(h.maxmp,h.mp+Math.floor(h.maxmp/2));
+  let evo='';
+  if(h.name==='Cryn'&&h.lv===10){
+    h.spells=h.spells.map(s=>s==='fire'?'inferno':(s==='lightning'?'storm':s));
+    if(!h.spells.includes('holylight'))h.spells.push('holylight');
+    evo=' Fire evolved into INFERNO! Learned HOLY LIGHT!';
+  }
+  return evo;
+}
+// ---------- monsters (names & attacks from the original) ----------
+const MONS={
+  gremlin:{name:'Gremlin',spr:'gremlin',hp:22,mp:0,atk:7,def:3,spd:5,xp:9,ai:['atk']},
+  bat:{name:'Vampire Bat',spr:'bat',hp:18,mp:0,atk:8,def:2,spd:11,xp:10,ai:['atk','bite']},
+  wolf:{name:'Grey Wolf',spr:'wolf',hp:30,mp:0,atk:10,def:4,spd:9,xp:14,ai:['atk']},
+  spider:{name:'Spider',spr:'spider',hp:26,mp:6,atk:9,def:4,spd:7,xp:13,ai:['atk','poison']},
+  chigger:{name:'Chigger',spr:'chigger',hp:14,mp:0,atk:6,def:2,spd:6,xp:8,ai:['atk']},
+  trug:{name:'Trug',spr:'trug',hp:34,mp:0,atk:11,def:5,spd:4,xp:16,ai:['atk']},
+  sloth:{name:'Tree Sloth',spr:'sloth',hp:40,mp:0,atk:12,def:6,spd:3,xp:18,ai:['atk','slam']},
+  hound:{name:'Rot Hound',spr:'hound',hp:44,mp:0,atk:14,def:6,spd:8,xp:22,ai:['atk','bite']},
+  mole:{name:'Death Mole',spr:'mole',hp:36,mp:0,atk:12,def:8,spd:5,xp:20,ai:['atk']},
+  fly:{name:'Swamp Fly',spr:'fly',hp:28,mp:8,atk:10,def:3,spd:12,xp:19,ai:['atk','disease']},
+  centipede:{name:'Centipede',spr:'centipede',hp:48,mp:0,atk:13,def:7,spd:6,xp:24,ai:['atk','sting']},
+  netherbeast:{name:'Nether Beast',spr:'netherbeast',hp:70,mp:10,atk:18,def:9,spd:9,xp:38,ai:['atk','flames']},
+  wyrm:{name:'Belfry Wyrm',spr:'wyrm',hp:60,mp:12,atk:16,def:8,spd:10,xp:34,ai:['atk','bolts']},
+  demonsoldier:{name:'Demon Soldier',spr:'demonsoldier',hp:64,mp:8,atk:17,def:10,spd:7,xp:36,ai:['atk','stare']},
+  treeent:{name:'King Tree Ent',spr:'treeent',hp:140,mp:20,atk:12,def:7,spd:5,xp:130,boss:1,ai:['atk','thorns','roots']},
+  poolguard:{name:'Pool Guardian',spr:'poolguard',hp:180,mp:24,atk:15,def:9,spd:7,xp:190,boss:1,ai:['atk','drown','waves']},
+  rii:{name:'Rii',spr:'rii',hp:130,mp:0,atk:13,def:8,spd:10,xp:110,boss:1,spare:1,ai:['atk','bite']},
+  neacres:{name:'Neacres',spr:'neacres',hp:240,mp:30,atk:18,def:10,spd:9,xp:280,boss:1,ai:['atk','mindnumb','bioflare']},
+  beorne:{name:'Beorne',spr:'beorneDemon',hp:280,mp:30,atk:20,def:12,spd:11,xp:450,boss:1,ai:['atk','slash','desecrate']},
+  possession:{name:'Possession',spr:'possession',hp:240,mp:40,atk:20,def:13,spd:12,xp:0,boss:1,ai:['atk','flames','desecrate','wail']},
+};
+const AINAME={atk:'attacks',bite:'bites',poison:'stings with venom',slam:'slams',disease:'spreads disease',
+  sting:'stings',flames:'breathes flames',bolts:'hurls bolts',stare:'freezes with its stare',thorns:'lashes with thorns',
+  roots:'snares with roots',drown:'drags you under',waves:'summons crushing waves',mindnumb:'casts Mind Numb',
+  bioflare:'casts Bio Flare',slash:'slashes with a demon blade',desecrate:'casts Desecrate Soul',wail:'wails from the void'};
+// ==================== STORY EVENTS ====================
+// op types: d[name,text,spr] m[text] battle[id] map[id,x,y] flag[k,v] heal add[name]
+// follow[id|null] hide[id] show[id] spr[id,newspr] music[x] sfx[x] shake wait[ms]
+// choice[[opts],flag] func[fn] msgbox handled via m
+const STORY={};
+STORY.intro=[
+  {m:'Life is but a short time, and existence is always temporary.'},
+  {m:'You are CRYN, younger son of the King. Your father is dying, and the succession weighs heavy on the castle.'},
+  {m:'Your brother BEORNE has a plan...'},
+  {music:'castle'},{map:['castle',9,8]},
+];
+STORY.king1=[
+  {d:['King','My sons I am not well at all, and it is clear one of you will be an heir to my throne. Cryn, so wise and of a kind heart. Beorne, so strong and knowing. You two must be strong during my final days.','king']},
+  {d:['Cryn','But dad, what will we do when you are gone?','cryn']},
+  {d:['King','Boys, listen to me. My decision on the heir has already been made. You must take care of each other while I gather my final moments ..','king']},
+  {flag:['king_met',1]},
+];
+STORY.king2=[
+  {d:['King',"I'm very weak Cryn.. let me rest. The least I can do is heal you.",'king']},
+  {heal:1},{sfx:'heal'},
+];
+STORY.beorne1=[
+  {d:['Beorne','Hey Cryn, I have an idea. Want to go hunting?','beorne']},
+  {d:['Cryn',"Our dad is dying, and you're thinking about killing things?",'cryn']},
+  {d:['Beorne',"Uhg Cryn, you're so naive. I know of this place .. in an ancient tree, which is supposed to house a special leaf capable of healing anything.",'beorne']},
+  {d:['Beorne',"The path is riddled with monsters, and evil .. hm, you know what, never mind Cryn. You're not strong enough for this kind of thing.",'beorne']},
+  {d:['Cryn',"I AM strong! And if this will help father, then I'm in!",'cryn']},
+  {d:['Beorne',"Ok then. I believe the tree is just east of the forest. If we can make it there quick enough, we should be able to help father.",'beorne']},
+  {flag:['beorne_joined',1]},{follow:'beorne'},
+  {m:'Beorne joined you! He will follow you through the forest.'},
+];
+STORY.treeent=[
+  {d:['King Tree Ent','I am the ancient guardian of the dark artifact. No one must be enslaved by its power again. Leave at once!','treeent']},
+  {d:['Beorne','You lie! I have come to claim the artifact, now out of my way!','beorne']},
+  {d:['Cryn',"Uh, Beorne? What's going on here?",'cryn']},
+  {d:['King Tree Ent','You fools. I have sworn to be the guardian and have not failed in a thousand years. If defeat is what you want, then you shall have it.','treeent']},
+  {music:'boss'},{sfx:'roar'},{battle:['treeent']},
+  {music:'cave'},{hide:'treeent'},
+  {d:['Cryn','Where is this magic leaf, to save father? You said it would be in here!','cryn']},
+  {d:['Beorne',"What's the rush Cryn? We both know who will be the next king when father dies .. you, of course. So, of anyone, you should be happy.",'beorne']},
+  {d:['Cryn','Happy? Happy of what?','cryn']},
+  {d:['Beorne',"That you let him die! It's your fault Cryn, and everyone knows you did it to become king next!",'beorne']},
+  {d:['Cryn',"That's not true! This was your idea .. but ... why? Why would you do this Beorne?",'cryn']},
+  {sfx:'roar'},{shake:1},{spr:['beorne','beorneDemon']},
+  {d:['???','Beorne ... is not my name ... anymore ..','beorneDemon']},
+  {d:['Cryn','Uhg, uhmm.. why do I ache all over?','cryn']},
+  {m:'Darkness takes you...'},
+  {flag:['ch2',1]},{follow:null},{hide:'beorne'},
+  {map:['ruins',9,9]},{music:'castle'},
+  {d:['Cryn','My god, what has happened here. The trees, they look as if they have been stained by blood.. I must speak to someone and find out what has happened to our castle.','cryn']},
+];
+STORY.ayli1=[
+  {d:['Cryn','You! Are you alright? What happened to the castle?','cryn']},
+  {d:['Ayli','Demons. They came through the south tunnel. I have tracked them to this castle and they appear to be coming from a tunnel to the south.','ayli']},
+  {d:['Ayli',"I didn't come all the way from the silver islands, fighting these demons one by one, just to be saved by a boy with a stick! I can take care of this on my own.",'ayli']},
+  {d:['Cryn','Then I will accompany you. I have a payback gift for someone, and I believe these demons will lead me to him.','cryn']},
+  {d:['Ayli',"Fine, but if you just once, even THINK of looking at me with those seedy eyes, the last thing you'll be seeing is the tip of this blade!",'ayli']},
+  {d:['Cryn','[Sheesh, tough girl ..]','cryn']},
+  {flag:['ayli_joined',1]},{add:'ayli'},{follow:'ayli'},
+  {m:'Ayli joined the party!'},
+];
+STORY.statue=[
+  {d:['Cryn','Strange, it looks like some kind of demon statue. It looks like its wing is some kind of lever.','cryn']},
+  {d:['Ayli','Well, only one thing to do then, pull its wing.','ayli']},
+  {d:['Cryn','Ok, here goes. [CLICK]','cryn']},
+  {d:['Demon Statue','The bones are broken, to stop the flood. One to cast, and two for blood.','statue']},
+  {d:['Ayli',"Come on Cryn, it is some kind of riddle. Lets look around and see what we can find.",'ayli']},
+  {flag:['riddle',1]},
+];
+STORY.poolguard=[
+  {d:['Pool Guardian','Welcome to my pool mortal. Perhaps the female would like to take a swim?','poolguard']},
+  {d:['Ayli','Keep your claws away from me you monster!','ayli']},
+  {d:['Cryn','Prepare to die demon!','cryn']},
+  {music:'boss'},{sfx:'roar'},{battle:['poolguard']},
+  {music:'cave'},{hide:'poolguard'},
+  {d:['Ayli','Cryn, look! The bone wall ahead is breaking apart. ... No. Still sealed. That statue riddle must be the key.','ayli']},
+];
+STORY.narz1=[
+  {d:['Narz The Ancient','A human? My what a surprise.','narz']},
+  {d:['Cryn',"I'm looking for my brother. Two humans passed through here, didn't they?",'cryn']},
+  {d:['Narz The Ancient','Well, perhaps I have. In fact, two humans to be exact passed through here. However, I can not let just anyone enter the dark gate.','narz']},
+  {d:['Narz The Ancient','You do a task for me, and I will allow you to pass. There is a dangerous evil monster in the forest. Return my pet, Rii, to us.','narz']},
+  {d:['Cryn','I will bring Rii back to you!','cryn']},
+  {flag:['narz_quest',1]},{show:'rii'},
+  {m:'Rii was spotted back in the Whispering Forest, to the east.'},
+];
+STORY.rii1=[
+  {d:['Cryn',"You, uh, you're coming with me!",'cryn']},
+  {d:['Rii','Grrrrumbble, grrrrowl ..','rii']},
+  {music:'boss'},{battle:['rii']},
+  {music:'forest'},
+];
+STORY.narz2=[
+  {d:['Narz The Ancient','I am quite surprised that you returned human. I surely thought my pet, Rii, would have been too much for you. But alas, a deal is a deal.','narz']},
+  {d:['Cryn',"So you'll let me enter the dark gate?",'cryn']},
+  {d:['Narz The Ancient','Yes, yes, that was the agreement. But I should warn you, the dark gate is no place for a human.','narz']},
+  {flag:['rii_done',1]},{follow:null},{hide:'rii'},
+  {sfx:'roar'},{shake:1},
+  {m:'The dark gate grinds open...'},
+  {show:'beorne'},
+];
+STORY.neacres=[
+  {d:['Neacres',"Cryn, my boy. I have a surprise for you. My, my, the brotherly rivalry is amazing, isn't it?",'neacres']},
+  {d:['Cryn','You know where Beorne is, don\'t you!','cryn']},
+  {d:['Neacres',"Yes, yes, all those questions shall be answered. I just love a good fight of family feuds. See you soon.",'neacres']},
+  {music:'boss'},{sfx:'roar'},{battle:['neacres']},
+  {music:'nether'},{hide:'neacres'},
+  {m:'Neacres dissolves into shadow, leaving behind a shimmering Ether and a Potion.'},
+  {item:['ether',1]},{item:['potion',1]},
+];
+STORY.beorneFinal=[
+  {d:['Beorne','Cryn.. you have plagued me long enough. I am coming, little.. brother..','beorneDemon']},
+  {d:['Cryn','Beorne! End this madness!','cryn']},
+  {d:['Beorne','Are you ready, Cryn? Remember what happened the last time we did this? Ha ha ha...','beorneDemon']},
+  {d:['Beorne','Make your move, Cryn.','beorneDemon']},
+  {music:'boss'},{sfx:'roar'},{battle:['beorne']},
+  {music:'nether'},
+  {d:['Cryn','My.. own.. brother.. No, I will not kill him.','cryn']},
+  {d:['Possession','You will finish him, Cryn. Think about all the pain he has caused your world. Finish him now, Cryn.','possession']},
+  {d:['Cryn','No. I know my brother is still there, somewhere inside. Even through all he has done, he is still my brother.','cryn']},
+  {d:['Possession','Finish him, Cryn! Do not let him torment another soul! Put an end to his misery!','possession']},
+  {d:['Cryn',"No, I won't kill him!",'cryn']},
+  {d:['Possession',"You fool! Don't you see? It doesn't matter which one of you kills the other so long as one of you dies by the other's hand!",'possession']},
+  {d:['Cryn','This is your doing! You poisoned his mind and controlled him all along!','cryn']},
+  {d:['Possession','You will kill him, if not by your own free will.. then by mine!','possession']},
+  {sfx:'roar'},{shake:1},
+  {d:['Possession','NOOO! This is not possible! ahhhhh','possession']},
+  {d:['Cryn',"Without a host to control, you're nothing but a meaningless parasite. Leave this world, forever!",'cryn']},
+  {d:['Cryn','A warm light floods the chamber... your wounds knit closed. (Party fully healed!)','cryn']},
+  {heal:1},
+  {d:['Cryn','Two potions and an ether shimmer into being where the light touched the floor. (Got 3 Potions, 1 Ether!)','cryn']},
+  {item:['potion',3]},{item:['ether',1]},
+  {battle:['possession']},
+  {hide:'possession'},{spr:['beorne','beorne']},
+  {d:['Beorne','Cryn, I.. am.. sorry..','beorne']},
+  {d:['Cryn','Beorne ..','cryn']},
+  {m:'Beorne is gone. The dark artifact crumbles to ash.'},
+  {d:['Possession','I will return.. one day.. when.. humans are weak.. again..','possession']},
+  {m:'And so the Dark Reflection ends... for now.'},
+  {func:'ending'},
+];
+
+// ==================== MAP / NPC / EXPLORE ====================
+function tileAt(x,y){
+  if(!G.map||y<0||y>=G.map.rows.length||x<0||x>=G.map.rows[0].length) return {ch:'#',def:{solid:true}};
+  const ch=G.map.rows[y][x], def=TILEDEF[ch]||{t:'base'};
+  return {ch,def};
+}
+function tileKey(x,y){
+  const {ch,def}=tileAt(x,y);
+  if(ch==='#') return (G.map&&G.map.solid)||'cavewall';
+  if(def.t==='base') return G.map.solid==='cwall'?'cfloor':(G.mapId==='tree'?'wood':(G.mapId==='tunnels'?'cavefloor':(G.mapId==='nether'?'darkfloor':'grass')));
+  return def.t;
+}
+function isSolid(x,y){
+  const {ch,def}=tileAt(x,y);
+  if(def.id==='bonewall'&&G.flags.wall_open) return false;
+  if(def.solid) return true;
+  if(G.npcs.some(n=>n.x===x&&n.y===y)) return true;
+  return false;
+}
+function npcAt(x,y){ return G.npcs.find(n=>n.x===x&&n.y===y); }
+const CHEST_LOOT={'castle,1,1':['potion','potion'],'tree,3,2':['ether','ether'],'tree,12,2':['potion','potion']};
+function loadMap(id,px,py){
+  G.mapId=id; G.map=MAPS[id]; G.px=px; G.py=py; G.mx=px; G.my=py; G.moving=false;
+  G.trail=[]; G.dir='down';
+  playMusic(G.map.music);
+  setupNpcs(); setupFollower();
+}
+function setupNpcs(){
+  G.npcs=[]; const F=G.flags, id=G.mapId;
+  const add=o=>{ if(F['hide_'+o.id])return; G.npcs.push(Object.assign({anim:0},o)); };
+  if(id==='castle'){
+    add({id:'king',name:'King',spr:'king',x:9,y:2,dir:'down',talk:()=>runEvent(F.king_met?STORY.king2:STORY.king1)});
+    if(!F.beorne_joined) add({id:'beorne',name:'Beorne',spr:'beorne',x:11,y:4,dir:'left',talk:()=>runEvent(STORY.beorne1)});
+  }else if(id==='forest'){
+    if(F.narz_quest&&!F.rii_done) add({id:'rii',name:'Rii',spr:'rii',x:20,y:3,talk:()=>runEvent(STORY.rii1)});
+  }else if(id==='tree'){
+    if(!F.ch2) add({id:'treeent',name:'King Tree Ent',spr:'treeent',x:7,y:2,dir:'down',talk:()=>runEvent(STORY.treeent)});
+  }else if(id==='ruins'){
+    if(!F.ayli_joined) add({id:'ayli',name:'Ayli',spr:'ayli',x:9,y:5,dir:'down',talk:()=>runEvent(STORY.ayli1)});
+  }else if(id==='tunnels'){
+    if(!F.pool_dead) add({id:'poolguard',name:'Pool Guardian',spr:'poolguard',x:11,y:6,dir:'down',talk:()=>runEvent(STORY.poolguard)});
+    add({id:'narz',name:'Narz The Ancient',spr:'narz',x:11,y:13,dir:'up',talk:()=>{
+      if(G.flags.rii_done) runEvent([{d:['Narz The Ancient','The dark gate stands open, human. Your brother waits beyond. Do not keep destiny waiting.','narz']}]);
+      else if(G.flags.rii_spared) runEvent(STORY.narz2);
+      else if(!G.flags.narz_quest) runEvent(STORY.narz1);
+      else runEvent([{d:['Narz The Ancient','Return my pet Rii from the forest, human, and the dark gate shall open.','narz']}]);
+    }});
+  }else if(id==='nether'){
+    if(!F.neacres_dead) add({id:'neacres',name:'Neacres',spr:'neacres',x:10,y:8,dir:'down',talk:()=>runEvent(STORY.neacres)});
+    if(!F.game_done) add({id:'beorne',name:'Beorne',spr:'beorneDemon',x:10,y:3,dir:'down',talk:()=>runEvent(STORY.beorneFinal)});
+  }
+}
+function setupFollower(){
+  const F=G.flags,id=G.mapId;
+  const want=[];
+  if(F.beorne_joined&&!F.ch2&&(id==='forest'||id==='tree')) want.push({id:'beorne',spr:'beorne'});
+  else{
+    if(F.ayli_joined&&['forest','ruins','tunnels','nether'].includes(id)) want.push({id:'ayli',spr:'ayli'});
+    if(F.rii_spared&&!F.rii_done&&(id==='forest'||id==='tunnels')) want.push({id:'rii',spr:'rii'});
+  }
+  const prev={}; (G.followers||[]).forEach(f=>{prev[f.id]=f;});
+  G.followers=want.map(w=>{ const q=prev[w.id];
+    return q?{id:w.id,spr:w.spr,x:q.x,y:q.y}:{id:w.id,spr:w.spr,x:G.px,y:G.py}; });
+}
+// ---------- triggers ----------
+function checkTriggers(){
+  const id=G.mapId,x=Math.round(G.px),y=Math.round(G.py),F=G.flags;
+  const T=(tx,ty,tw,th)=>x>=tx&&x<tx+(tw||1)&&y>=ty&&y<ty+(th||1);
+  if(id==='castle'&&T(9,11)){ if(!F.beorne_joined){say('Beorne is waiting by the throne. (Speak with him first.)');G.py=10;} else loadMap('forest',1,10); }
+  else if(id==='forest'&&T(1,9,1,2)) loadMap('castle',9,10);
+  else if(id==='forest'&&T(24,14,1,2)) loadMap('tree',8,12);
+  else if(id==='tree'&&T(8,12)) loadMap('forest',23,14);
+  else if(id==='tree'&&T(6,4,4,2)&&!F.treeentBoss){ F.treeentBoss=1; runEvent(STORY.treeent); }
+  else if(id==='ruins'&&T(9,11)) loadMap('tunnels',11,2);
+  else if(id==='ruins'&&T(9,0)) loadMap('forest',9,18);
+  else if(id==='forest'&&T(9,19)){ if(!F.ch2){say('Thorn-choked brambles bar the south trail. (Defeat the King Tree Ent in the east first.)');G.py=18;} else loadMap('ruins',9,1); }
+  else if(id==='tunnels'&&T(11,1)) loadMap('ruins',9,10);
+  else if(id==='tunnels'&&T(11,14)){ if(!F.rii_done){say('The dark gate is sealed by Narz\'s magic. (Return Rii first.)');G.py=13;} else loadMap('nether',10,12); }
+}
+// ---------- dialog ----------
+const DLG={on:false,name:'',text:'',spr:null,shown:0,done:false};
+function wrapText(g,text,maxW){
+  const words=text.split(' '),lines=[];let line='';
+  words.forEach(w=>{ if(w==='\n'){lines.push(line);line='';return;}
+    const t=line?line+' '+w:w;
+    if(g.measureText(t).width>maxW){lines.push(line);line=w;} else line=t; });
+  if(line)lines.push(line); return lines;
+}
+function showDialog(name,text,spr){ DLG.on=true;DLG.name=name;DLG.text=text;DLG.spr=spr||null;DLG.shown=0;DLG.done=false; sfx.talk(); }
+function say(t){ showDialog('',t,null); }
+function updateDialog(){
+  if(pressed[' ']||pressed['enter']||pressed['ta']){
+    if(!DLG.done){DLG.shown=DLG.text.length;DLG.done=true;}
+    else {DLG.on=false; doEv();}
+  }
+}
+function drawDialog(){
+  if(!DLG.on)return;
+  ctx.fillStyle='rgba(4,4,10,0.88)'; ctx.fillRect(8,H-92,W-16,84);
+  ctx.strokeStyle='#5c2d86'; ctx.lineWidth=2; ctx.strokeRect(8,H-92,W-16,84);
+  if(DLG.spr&&SPR[DLG.spr]){ ctx.drawImage(SPR[DLG.spr],20,H-80,48,48);
+    ctx.strokeStyle='#3b2d5c'; ctx.strokeRect(20,H-80,48,48); }
+  const tx=DLG.spr?80:22;
+  ctx.fillStyle='#f2d13d'; ctx.font='bold 11px Courier New';
+  if(DLG.name)ctx.fillText(DLG.name,tx,H-70);
+  ctx.fillStyle='#e8e8f0'; ctx.font='11px Courier New';
+  const sub=DLG.text.slice(0,Math.floor(DLG.shown));
+  const lines=wrapText(ctx,sub,tx?W-tx-24:W-44);
+  lines.slice(0,4).forEach((l,i)=>ctx.fillText(l,tx,H-52+i*14));
+  if(DLG.done){ ctx.fillStyle='#8a8aa0'; ctx.fillText('▼',W-28,H-16); }
+}
+// ---------- event runner ----------
+let EVQ=[];
+function runEvent(ev){ EVQ=ev.slice(); G.state='event'; doEv(); }
+function doEv(){
+  if(!EVQ.length){ G.state='explore'; return; }
+  const op=EVQ.shift();
+  if(op.d) showDialog(op.d[0],op.d[1],op.d[2]);
+  else if(op.m) say(op.m);
+  else if(op.battle) startBattle(op.battle[0]);
+  else if(op.map){ loadMap(op.map[0],op.map[1],op.map[2]); doEv(); }
+  else if(op.flag){ G.flags[op.flag[0]]=op.flag[1]; setupNpcs(); setupFollower(); doEv(); }
+  else if(op.heal){ G.party.forEach(h=>{h.hp=h.maxhp;h.mp=h.maxmp;h.alive=true;}); doEv(); }
+  else if(op.item){ G.items[op.item[0]]=(G.items[op.item[0]]||0)+op.item[1]; doEv(); }
+  else if(op.add){ if(op.add==='ayli'&&!G.party.some(h=>h.name==='Ayli'))G.party.push(newAyli()); doEv(); }
+  else if(op.follow){ /* follower derived from flags */ setupFollower(); doEv(); }
+  else if(op.hide){ G.flags['hide_'+op.hide]=1; setupNpcs(); setupFollower(); doEv(); }
+  else if(op.show){ delete G.flags['hide_'+op.show]; setupNpcs(); doEv(); }
+  else if(op.spr){ const n=G.npcs.find(n=>n.id===op.spr[0]); if(n)n.spr=op.spr[1];
+      (G.followers||[]).forEach(f=>{if(f.id===op.spr[0])f.spr=op.spr[1];}); doEv(); }
+  else if(op.music){ playMusic(op.music); doEv(); }
+  else if(op.sfx){ sfx[op.sfx](); doEv(); }
+  else if(op.shake){ G.shakeT=24; doEv(); }
+  else if(op.wait){ G.waitT=op.wait; }
+  else if(op.func==='ending'){ showEnding(); }
+  else doEv();
+}
+function fullHeal(){ G.party.forEach(h=>{h.hp=h.maxhp;h.mp=h.maxmp;h.alive=true;}); }
+// ---------- interact ----------
+function interact(){
+  const d=G.dir, fx=Math.round(G.px)+(d==='right'?1:d==='left'?-1:0), fy=Math.round(G.py)+(d==='down'?1:d==='up'?-1:0);
+  const n=npcAt(fx,fy);
+  if(n){ sfx.talk(); n.talk(); return; }
+  const {ch}=tileAt(fx,fy);
+  const key=G.mapId+','+fx+','+fy;
+  if(ch==='C'){
+    if(G.chests[key]){ say('The chest is empty.'); return; }
+    G.chests[key]=1; sfx.chest();
+    const loot=CHEST_LOOT[key]||['potion'];
+    loot.forEach(it=>{ G.items[it]=(G.items[it]||0)+1; });
+    say('Found '+loot.map(i=>i==='potion'?'Potion':i==='ether'?'Ether':i).join(', ')+'!');
+    return;
+  }
+  if(ch==='V'){ fullHeal(); sfx.save(); saveGame(); say('Your wounds are healed... Progress saved at the crystal.'); return; }
+  if(ch==='X'){ if(!G.flags.riddle) runEvent(STORY.statue); else say('Demon Statue: "The bones are broken, to stop the flood. One to cast, and two for blood."'); return; }
+  if(ch==='1'||ch==='2'){
+    const name=ch==='1'?'CAST':'BLOOD';
+    if(!G.flags.riddle){ say('A lever labeled '+name+'. (Perhaps the statue\'s riddle holds a clue.)'); return; }
+    if(G.flags.wall_open){ say('The '+name+' lever is spent.'); return; }
+    sfx.select(); G.leverOrder.push(name);
+    if(G.leverOrder.length===1){ say('You pull the '+name+' lever. It clunks into place...'); return; }
+    if(G.leverOrder[0]==='CAST'&&G.leverOrder[1]==='BLOOD'){
+      G.flags.wall_open=1; sfx.roar(); G.shakeT=30;
+      say('The bone wall crumbles to dust! The way north is open.');
+    }else{
+      G.leverOrder=[]; sfx.hurt();
+      say('Nothing happens... the bones rattle hungrily. (Wrong order — the levers reset.)');
+    }
+    return;
+  }
+}
+// ---------- explore update ----------
+function updateExplore(dt){
+  const d=dirHeld();
+  if(d) G.dir=d;
+  // lock onto a target tile when idle; keep moving to it until arrival
+  if(!G.moving&&d){
+    const dx=d==='right'?1:d==='left'?-1:0, dy=d==='down'?1:d==='up'?-1:0;
+    const nx=Math.round(G.px)+dx, ny=Math.round(G.py)+dy;
+    if(!isSolid(nx,ny)){ G.moving=true; G.tx=nx; G.ty=ny; G.tdx=dx; G.tdy=dy; }
+  }
+  if(G.moving){
+    const sp=Math.min(1,dt*4.5);
+    G.px+=G.tdx*sp; G.py+=G.tdy*sp;
+    G.stepAcc+=dt;
+    if(Math.floor(G.stepAcc*8)!==Math.floor((G.stepAcc-dt)*8)) sfx.step();
+    // arrived at tile center?
+    if((G.tdx>0&&G.px>=G.tx)||(G.tdx<0&&G.px<=G.tx)||(G.tdy>0&&G.py>=G.ty)||(G.tdy<0&&G.py<=G.ty)){
+      G.px=G.tx; G.py=G.ty; G.moving=false;
+      G.trail.push({x:G.tx,y:G.ty}); if(G.trail.length>60)G.trail.shift();
+      onEnterTile(G.tx,G.ty);
+    }
+  }
+  if(btnA()){ interact(); }
+  // followers
+  (G.followers||[]).forEach((f,i)=>{
+    const t=G.trail[Math.max(0,G.trail.length-6*(i+1))];
+    if(t){ const dx=t.x-f.x, dy=t.y-f.y, dist=Math.hypot(dx,dy);
+      if(dist>0.1){ const sp=Math.min(dist,dt*5); f.x+=dx/dist*sp; f.y+=dy/dist*sp; } }
+  });
+  // camera
+  const mw=G.map.rows[0].length*TILE, mh=G.map.rows.length*TILE;
+  G.camX=clamp(Math.round(G.px*TILE+8-W/2),0,Math.max(0,mw-W));
+  G.camY=clamp(Math.round(G.py*TILE+8-H/2),0,Math.max(0,mh-H));
+}
+function onEnterTile(x,y){
+  checkTriggers(); if(G.state!=='explore')return;
+  const {ch,def}=tileAt(x,y);
+  const encOK = def.enc || (G.mapId!=='forest' && (ch==='.'));
+  if(encOK&&G.map.enc&&chance(0.10)){
+    const n=rnd(1,3), team=[];
+    for(let i=0;i<n;i++)team.push(G.map.enc[rnd(0,G.map.enc.length-1)]);
+    startBattle(team);
+  }
+}
+// ---------- explore draw ----------
+function drawExplore(){
+  const ox=G.camX+(G.shakeT>0?rnd(-2,2):0), oy=G.camY+(G.shakeT>0?rnd(-2,2):0);
+  const x0=Math.floor(ox/TILE), y0=Math.floor(oy/TILE);
+  for(let ty=y0;ty<y0+VH+1;ty++)for(let tx=x0;tx<x0+VW+1;tx++){
+    const k=tileKey(tx,ty), t=TILES[k]||TILES.grass;
+    ctx.drawImage(t,tx*TILE-ox,ty*TILE-oy);
+    // chest/crystal/statue/lever overlays
+    const ch=tileAt(tx,ty).ch;
+    const key=G.mapId+','+tx+','+ty;
+    if(ch==='C')ctx.drawImage(SPR[G.chests[key]?'chestOpen':'chest'],tx*TILE-ox,ty*TILE-oy);
+    else if(ch==='V')ctx.drawImage(SPR.crystal,tx*TILE-ox,ty*TILE-oy);
+    else if(ch==='X')ctx.drawImage(SPR.statue,tx*TILE-ox,ty*TILE-oy);
+    else if(ch==='1'||ch==='2')ctx.drawImage(TILES.lever,tx*TILE-ox,ty*TILE-oy);
+  }
+  // npcs
+  G.npcs.forEach(n=>{ const bob=Math.sin(G.playT*4+n.x)*1;
+    ctx.drawImage(SPR[n.spr],n.x*TILE-ox,n.y*TILE-oy+bob); });
+  // follower
+  (G.followers||[]).forEach(f=>{ const bob=Math.sin(G.playT*6)*1.5;
+    ctx.drawImage(SPR[f.spr],f.x*TILE-ox,f.y*TILE-oy+bob); });
+  // player
+  const bob=dirHeld()?Math.sin(G.playT*10)*1.5:0;
+  ctx.drawImage(SPR.cryn,G.px*TILE-ox,G.py*TILE-oy+bob);
+  // HUD
+  ctx.fillStyle='rgba(4,4,10,0.75)'; ctx.fillRect(0,0,W,20);
+  ctx.fillStyle='#f2d13d'; ctx.font='bold 10px Courier New';
+  const h=G.party[0];
+  ctx.fillText((G.map?G.map.name:'').toUpperCase(),8,13);
+  if(h)ctx.fillText('HP '+h.hp+'/'+h.maxhp+' MP '+h.mp+'/'+h.maxmp+' LV '+h.lv+' XP '+h.xp+'/'+xpNext(h.lv),150,13);
+  if(G.party[1])ctx.fillText('AYLI '+G.party[1].hp+'/'+G.party[1].maxhp,400,13);
+  drawDialog();
+}
+
+// ==================== BATTLE ====================
+const B={on:false,foes:[],order:[],oi:0,phase:'',menu:0,sub:0,tgt:0,msg:'',msgT:0,timer:0,
+  hero:0,spell:0,item:0,scripted:false,spareOK:false,act:null,flashT:0,shakeT:0};
+function startBattle(team){
+  const ids=Array.isArray(team)?team:[team];
+  B.foes=ids.map(id=>{ const m=MONS[id]; return Object.assign({id},m,{maxhp:m.hp,maxmp:m.mp}); });
+  B.on=true; B.phase='intro'; B.timer=90; B.scripted=!Array.isArray(team);
+  B.msg=(B.foes.length>1?'Monsters appear!':B.foes[0].name+' blocks your path!');
+  G.state='battle'; playMusic(B.foes[0].boss?'boss':'battle'); sfx.roar();
+}
+function battleXP(){ return B.foes.reduce((s,f)=>s+f.xp,0); }
+function heroesAlive(){ return G.party.filter(h=>h.alive); }
+function foesAlive(){ return B.foes.filter(f=>f.hp>0); }
+function buildOrder(){
+  const cs=[];
+  G.party.forEach(h=>{ if(h.alive)cs.push({t:'h',o:h,spd:h.spd+rnd(0,4)}); });
+  B.foes.forEach(f=>{ if(f.hp>0)cs.push({t:'f',o:f,spd:f.spd+rnd(0,4)}); });
+  cs.sort((a,b)=>b.spd-a.spd); B.order=cs; B.oi=0;
+}
+function physDmg(atk,def,mult){ return Math.max(1,Math.round((atk*2-def)* (mult||1))+rnd(-3,3)); }
+function spellDmg(pow,atk,def){ return Math.max(1,Math.round(pow+atk*0.5-def*0.4)+rnd(-2,4)); }
+function foeAction(f){
+  const mv=f.ai[rnd(0,f.ai.length-1)];
+  const tgt=heroesAlive()[rnd(0,heroesAlive().length-1)];
+  if(!tgt)return;
+  const M={
+    atk:[1,'attacks'],bite:[1.25,'bites'],slam:[1.35,'slams'],sting:[1.15,'stings'],
+    poison:[1.1,'stings with venom'],disease:[1.1,'spreads disease'],flames:[1.3,'breathes flames'],
+    bolts:[1.4,'hurls bolts'],stare:[1.2,'freezes with its stare'],thorns:[1.15,'lashes with thorns'],
+    roots:[1.25,'snares with roots'],drown:[1.5,'drags under the water'],waves:[1.3,'summons crushing waves'],
+    slash:[1.35,'slashes with a demon blade'],desecrate:[1.3,'casts Desecrate Soul'],wail:[1.05,'wails from the void'],
+  }[mv]||[1,'attacks'];
+  if(mv==='mindnumb'){ tgt.atk=Math.max(1,tgt.atk-4); B.msg=f.name+' casts Mind Numb! '+tgt.name+"'s attack fell!"; sfx.magic(); return; }
+  if(mv==='bioflare'){ const d=spellDmg(24,f.atk,tgt.def); hurtHero(tgt,d); B.msg=f.name+' casts Bio Flare! '+tgt.name+' takes '+d+'!'; sfx.magic(); return; }
+  if(mv==='wail'){ heroesAlive().forEach(h=>hurtHero(h,physDmg(f.atk,h.def,1.2))); B.msg=f.name+' wails from the void! The party takes damage!'; sfx.roar(); return; }
+  const d=physDmg(f.atk,tgt.def,M[0]); hurtHero(tgt,d);
+  B.msg=f.name+' '+M[1]+' '+tgt.name+'! '+d+' damage!'; sfx.hit();
+}
+function hurtHero(h,d){ h.hp-=d; B.flashT=12; if(h.hp<=0){h.hp=0;h.alive=false; sfx.die(); B.msg+=' '+h.name+' falls!';} }
+function heroAttack(h,f){ const d=physDmg(h.atk,f.def,1); f.hp-=d; sfx.hit(); B.flashT=12;
+  B.msg=h.name+' attacks '+f.name+'! '+Math.max(0,d)+' damage!';
+  if(f.hp<=0){ if(f.spare){ f.hp=1; B.msg+=' '+f.name+' collapses, whimpering...'; }
+    else { f.hp=0; B.msg+=' '+f.name+' is slain!'; sfx.die(); } } }
+function heroSpell(h,sp,f){
+  h.mp-=sp.mp; sfx.magic(); B.flashT=12;
+  if(sp.type==='heal'){ const amt=sp.pow+rnd(0,8); f.hp=Math.min(f.maxhp,f.hp+amt); B.msg=h.name+' casts '+sp.name+'! '+f.name+' recovers '+amt+' HP!'; sfx.heal(); }
+  else if(sp.type==='debuff'){ f.atk=Math.max(1,f.atk-4); B.msg=h.name+' casts '+sp.name+'! '+f.name+"'s attack fell!"; }
+  else { const d=spellDmg(sp.pow,h.atk,f.def); f.hp-=d; B.msg=h.name+' casts '+sp.name+' on '+f.name+'! '+Math.max(0,d)+' damage!';
+    if(f.hp<=0){ if(f.spare){ f.hp=1; B.msg+=' '+f.name+' collapses, whimpering...'; }
+      else { f.hp=0; B.msg+=' '+f.name+' is slain!'; sfx.die(); } } }
+}
+function useItem(h,item){
+  if(item==='potion'){ const amt=45+rnd(0,10); h.hp=Math.min(h.maxhp,h.hp+amt); B.msg=h.name+' uses a Potion! Recovers '+amt+' HP!'; }
+  else { const amt=25+rnd(0,8); h.mp=Math.min(h.maxmp,h.mp+amt); B.msg=h.name+' uses an Ether! Recovers '+amt+' MP!'; }
+  G.items[item]--; sfx.heal();
+}
+function checkSpare(){ B.spareOK=B.foes.some(f=>f.spare&&f.hp>0&&f.hp<f.maxhp*0.35); }
+function updateBattle(dt){
+  B.timer-=dt*60; B.msgT+=dt;
+  if(B.flashT>0)B.flashT--;
+  checkSpare();
+  switch(B.phase){
+    case 'intro':
+      if(B.timer<=0){ buildOrder(); B.phase='turn'; }
+      break;
+    case 'turn':{
+      if(!foesAlive().length){ winBattle(); break; }
+      if(!heroesAlive().length){ loseBattle(); break; }
+      if(B.oi>=B.order.length){ buildOrder(); }
+      const c=B.order[B.oi++];
+      if(c.t==='h'&&!c.o.alive){ B.phase='turn'; break; }
+      if(c.t==='f'&&c.o.hp<=0){ B.phase='turn'; break; }
+      if(c.t==='h'){ B.hero=G.party.indexOf(c.o); B.phase='menu'; B.menu=0; B.msg=c.o.name+"'s turn. Choose a command."; }
+      else { foeAction(c.o); B.phase='pause'; B.timer=75; }
+      break; }
+    case 'pause':
+      if(B.timer<=0) B.phase='turn';
+      break;
+    case 'winmsg':
+      if(B.timer<=0){ endBattleWin(); }
+      break;
+    case 'losemsg':
+      if(B.timer<=0){ G.state='gameover'; stopMusic(); }
+      break;
+  }
+  // menu input
+  if(B.phase==='menu'){
+    const h=G.party[B.hero];
+    const cmds=['ATTACK','MAGIC','ITEM','RUN'].concat(B.spareOK?['SPARE']:[]);
+    if(pressed['arrowup']||pressed['up']){B.menu=(B.menu+cmds.length-1)%cmds.length;sfx.select();}
+    if(pressed['arrowdown']||pressed['down']){B.menu=(B.menu+1)%cmds.length;sfx.select();}
+    if(btnA()){
+      const c=cmds[B.menu];
+      if(c==='ATTACK'){B.phase='target';B.tgt=0;B.act='atk';}
+      else if(c==='MAGIC'){B.phase='spell';B.spell=0;}
+      else if(c==='ITEM'){B.phase='item';B.item=0;}
+      else if(c==='SPARE'){doSpare();}
+      else if(c==='RUN'){
+        const boss=B.foes[0].boss;
+        if(boss){B.msg="Can't escape!";B.phase='pause';B.timer=60;}
+        else if(chance(0.65)){B.msg='Got away safely!';B.phase='flee';B.timer=60;}
+        else {B.msg="Can't escape!";B.phase='pause';B.timer=60;}
+      }
+      sfx.select();
+    }
+  }else if(B.phase==='target'){
+    const alive=foesAlive();
+    if(pressed['arrowleft']||pressed['left']){B.tgt=(B.tgt+alive.length-1)%alive.length;sfx.select();}
+    if(pressed['arrowright']||pressed['right']){B.tgt=(B.tgt+1)%alive.length;sfx.select();}
+    if(btnA()){ const h=G.party[B.hero];
+      if(B.act==='atk')heroAttack(h,alive[B.tgt]);
+      else heroSpell(h,SPELLS[h.spells[B.spell]],B.act==='heal'?G.party[B.htgt]:alive[B.tgt]);
+      B.phase='pause';B.timer=80; sfx.select();
+    }
+    if(btnB()){B.phase='menu';sfx.back();}
+  }else if(B.phase==='spell'){
+    const h=G.party[B.hero],ss=h.spells;
+    if(pressed['arrowup']||pressed['up']){B.spell=(B.spell+ss.length-1)%ss.length;sfx.select();}
+    if(pressed['arrowdown']||pressed['down']){B.spell=(B.spell+1)%ss.length;sfx.select();}
+    if(btnB()){B.phase='menu';sfx.back();}
+    if(btnA()){ const sp=SPELLS[ss[B.spell]];
+      if(h.mp<sp.mp){B.msg='Not enough MP!';}
+      else if(sp.type==='heal'){B.phase='htarget';B.htgt=0;B.act='heal';}
+      else {B.phase='target';B.tgt=0;B.act='spell';}
+      sfx.select();
+    }
+  }else if(B.phase==='htarget'){
+    const hs=G.party;
+    if(pressed['arrowleft']||pressed['left']){B.htgt=(B.htgt+hs.length-1)%hs.length;sfx.select();}
+    if(pressed['arrowright']||pressed['right']){B.htgt=(B.htgt+1)%hs.length;sfx.select();}
+    if(btnA()){ const h=G.party[B.hero]; heroSpell(h,SPELLS[h.spells[B.spell]],hs[B.htgt]); B.phase='pause';B.timer=80; sfx.select(); }
+    if(btnB()){B.phase='spell';sfx.back();}
+  }else if(B.phase==='item'){
+    const inv=Object.keys(G.items).filter(k=>G.items[k]>0);
+    if(!inv.length){B.msg='No items!';B.phase='menu';}
+    else{
+      if(pressed['arrowup']||pressed['up']){B.item=(B.item+inv.length-1)%inv.length;sfx.select();}
+      if(pressed['arrowdown']||pressed['down']){B.item=(B.item+1)%inv.length;sfx.select();}
+      if(btnB()){B.phase='menu';sfx.back();}
+      if(btnA()){B.phase='htarget2';B.htgt=0;B.useItem=inv[B.item];sfx.select();}
+    }
+  }else if(B.phase==='htarget2'){
+    const hs=G.party;
+    if(pressed['arrowleft']||pressed['left']){B.htgt=(B.htgt+hs.length-1)%hs.length;sfx.select();}
+    if(pressed['arrowright']||pressed['right']){B.htgt=(B.htgt+1)%hs.length;sfx.select();}
+    if(btnA()){ useItem(hs[B.htgt],B.useItem); B.phase='pause';B.timer=80; }
+    if(btnB()){B.phase='item';sfx.back();}
+  }else if(B.phase==='flee'){
+    if(B.timer<=0){ B.on=false; playMusic(G.map.music); G.state='explore'; }
+  }
+}
+function doSpare(){
+  const f=B.foes.find(f=>f.spare&&f.hp>0);
+  B.msg='You lower your blade... '+f.name+' whimpers and nuzzles your hand. Rii joins you!';
+  G.flags.rii_spared=1; G.flags['hide_rii']=1;
+  setupNpcs(); setupFollower();
+  sfx.heal(); B.phase='winmsg'; B.timer=110; B.xpGiven=0;
+}
+function winBattle(){
+  B.phase='winmsg'; B.timer=110; sfx.level();
+  const xp=battleXP(); B.xpGiven=xp; G.battlesWon++;
+  let msg='Victory! Gained '+xp+' XP! ';
+  G.party.forEach(h=>{ if(!h.alive)return; h.xp+=xp;
+    while(h.xp>=xpNext(h.lv)){ h.xp-=xpNext(h.lv); const evo=levelUp(h); msg+=h.name+' grew to LV '+h.lv+'!'+evo+' '; sfx.level(); }
+  });
+  if(B.foes[0].spare&&B.foes[0].hp>0){ /* spared path handled in doSpare */ }
+  B.msg=msg; checkSpareOff();
+}
+function checkSpareOff(){ B.spareOK=false; }
+function endBattleWin(){
+  B.on=false;
+  if(B.scripted){ G.state='event'; playMusic(G.map.music); doEv(); }
+  else { G.state='explore'; if(G.map)playMusic(G.map.music); }
+}
+function loseBattle(){ B.phase='losemsg'; B.timer=90; B.msg='The party has fallen...'; sfx.die(); }
+// ---------- battle draw ----------
+function drawBattleBG(){
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#0d0d1f'); g.addColorStop(0.6,'#1a1030'); g.addColorStop(1,'#050508');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='rgba(120,60,180,0.08)';
+  for(let i=0;i<8;i++)ctx.fillRect(i*70,(i*37)%H,2,40); // faint pillars
+  ctx.fillStyle='#241b3a'; ctx.fillRect(0,H-120,W,120);
+  ctx.fillStyle='#2e2347'; ctx.fillRect(0,H-120,W,3);
+}
+function drawBattle(){
+  drawBattleBG();
+  const n=B.foes.length;
+  B.foes.forEach((f,i)=>{
+    if(f.hp<=0)return;
+    const bx=W/2+(i-(n-1)/2)*110, by=70;
+    const bob=Math.sin(G.playT*3+i*2)*3;
+    const fl=B.flashT>0&&B.phase!=='menu'?((Math.floor(B.flashT)%2)?0.4:1):1;
+    ctx.globalAlpha=fl;
+    ctx.drawImage(SPR[f.spr],bx-24,by+bob,48,48);
+    ctx.globalAlpha=1;
+    // name + hp bar
+    ctx.fillStyle='#fff'; ctx.font='10px Courier New'; ctx.textAlign='center';
+    ctx.fillText(f.name,bx,by+62);
+    ctx.fillStyle='#400'; ctx.fillRect(bx-24,by+66,48,5);
+    ctx.fillStyle='#e23b3b'; ctx.fillRect(bx-24,by+66,48*Math.max(0,f.hp/f.maxhp),5);
+    ctx.textAlign='left';
+  });
+  // heroes
+  G.party.forEach((h,i)=>{
+    const hx=90+i*70, hy=H-105;
+    if(!h.alive){ctx.globalAlpha=0.3;}
+    ctx.drawImage(SPR[h.spr],hx,hy,32,32);
+    ctx.globalAlpha=1;
+    ctx.fillStyle='#fff'; ctx.font='10px Courier New';
+    ctx.fillText(h.name+'  '+h.hp+'/'+h.maxhp,hx-8,hy+44);
+    ctx.fillStyle='#004'; ctx.fillRect(hx-8,hy+48,48,4);
+    ctx.fillStyle='#3f7fe0'; ctx.fillRect(hx-8,hy+48,48*(h.hp/h.maxhp),4);
+  });
+  // message box
+  ctx.fillStyle='rgba(4,4,10,0.9)'; ctx.fillRect(8,H-76,W-16,68);
+  ctx.strokeStyle='#5c2d86'; ctx.lineWidth=2; ctx.strokeRect(8,H-76,W-16,68);
+  ctx.fillStyle='#e8e8f0'; ctx.font='11px Courier New';
+  wrapText(ctx,B.msg,W-60).slice(0,3).forEach((l,i)=>ctx.fillText(l,22,H-54+i*14));
+  // menus
+  const h=G.party[B.hero];
+  if(B.phase==='menu'&&h){
+    const cmds=['ATTACK','MAGIC','ITEM','RUN'].concat(B.spareOK?['SPARE']:[]);
+    ctx.fillStyle='rgba(4,4,10,0.9)'; ctx.fillRect(W-150,H-150,142,cmds.length*20+12);
+    ctx.strokeStyle='#5c2d86'; ctx.strokeRect(W-150,H-150,142,cmds.length*20+12);
+    cmds.forEach((c,i)=>{ ctx.fillStyle=i===B.menu?'#f2d13d':'#c9ced8'; ctx.font='11px Courier New';
+      ctx.fillText((i===B.menu?'▶ ':'  ')+c,W-138,H-132+i*20); });
+  }else if(B.phase==='spell'&&h){
+    ctx.fillStyle='rgba(4,4,10,0.9)'; ctx.fillRect(W-220,H-190,212,h.spells.length*20+12);
+    ctx.strokeStyle='#5c2d86'; ctx.strokeRect(W-220,H-190,212,h.spells.length*20+12);
+    h.spells.forEach((s,i)=>{ const sp=SPELLS[s];
+      ctx.fillStyle=i===B.spell?'#f2d13d':'#c9ced8'; ctx.font='11px Courier New';
+      ctx.fillText((i===B.spell?'▶ ':'  ')+sp.name+'  MP'+sp.mp,W-208,H-172+i*20); });
+  }else if(B.phase==='item'){
+    const inv=Object.keys(G.items).filter(k=>G.items[k]>0);
+    ctx.fillStyle='rgba(4,4,10,0.9)'; ctx.fillRect(W-220,H-160,212,inv.length*20+12);
+    ctx.strokeStyle='#5c2d86'; ctx.strokeRect(W-220,H-160,212,inv.length*20+12);
+    inv.forEach((k,i)=>{ ctx.fillStyle=i===B.item?'#f2d13d':'#c9ced8'; ctx.font='11px Courier New';
+      ctx.fillText((i===B.item?'▶ ':'  ')+(k==='potion'?'Potion':'Ether')+' x'+G.items[k],W-208,H-142+i*20); });
+  }
+  if(B.phase==='target'||B.phase==='htarget'||B.phase==='htarget2'){
+    ctx.fillStyle='#f2d13d'; ctx.font='bold 11px Courier New';
+    ctx.fillText('◀ ▶ choose target, A confirm',22,H-88);
+  }
+  if(B.spareOK&&['menu'].includes(B.phase)){
+    ctx.fillStyle='#7de0e6'; ctx.font='bold 11px Courier New';
+    ctx.fillText('Rii is weakening... SPARE is available!',22,26);
+  }
+}
+
+// ==================== SAVE / LOAD ====================
+const SAVE_KEY='cryn_web_save_v1';
+function saveGame(){
+  try{
+    localStorage.setItem(SAVE_KEY,JSON.stringify({flags:G.flags,party:G.party,items:G.items,
+      chests:G.chests,mapId:G.mapId,px:Math.round(G.px),py:Math.round(G.py),playT:G.playT,battlesWon:G.battlesWon}));
+  }catch(e){}
+}
+function loadSave(){
+  try{ const s=JSON.parse(localStorage.getItem(SAVE_KEY)); return s||null; }catch(e){ return null; }
+}
+function applySave(s){
+  G.flags=s.flags; G.party=s.party; G.items=s.items; G.chests=s.chests||{};
+  G.playT=s.playT||0; G.battlesWon=s.battlesWon||0;
+  loadMap(s.mapId,s.px,s.py); G.state='explore';
+}
+// ==================== TITLE / END SCREENS ====================
+function drawTitle(){
+  ctx.fillStyle='#050508'; ctx.fillRect(0,0,W,H);
+  // eerie moon
+  ctx.fillStyle='#1a1030'; ctx.beginPath(); ctx.arc(W/2,86,60,0,7); ctx.fill();
+  ctx.fillStyle='#e8e0c8'; ctx.beginPath(); ctx.arc(W/2,80,34,0,7); ctx.fill();
+  ctx.fillStyle='#050508'; ctx.beginPath(); ctx.arc(W/2+12,72,30,0,7); ctx.fill();
+  // hero silhouette
+  ctx.drawImage(SPR.cryn,W/2-32,150,64,64);
+  ctx.drawImage(SPR.beorneDemon,W/2+8,158,48,48);
+  ctx.fillStyle='#a05ce0'; ctx.font='bold 34px Courier New'; ctx.textAlign='center';
+  ctx.fillText('CRYN',W/2,52);
+  ctx.fillStyle='#5c2d86'; ctx.font='bold 13px Courier New';
+  ctx.fillText('— THE DARK REFLECTION —',W/2,72);
+  ctx.fillStyle='#8a8aa0'; ctx.font='11px Courier New';
+  ctx.fillText('a web tale reimagining of pixelquestress/cryn',W/2,238);
+  const opts=['NEW GAME']; if(loadSave())opts.push('CONTINUE');
+  opts.forEach((o,i)=>{ ctx.fillStyle=i===G.titleSel?'#f2d13d':'#c9ced8';
+    ctx.fillText((i===G.titleSel?'▶ ':'  ')+o,W/2,258+i*18); });
+  ctx.fillStyle='#5f646f'; ctx.font='10px Courier New';
+  ctx.fillText('Arrows/WASD move · Space/Enter confirm · M music',W/2,300-8);
+  ctx.textAlign='left';
+}
+function updateTitle(){
+  const n=loadSave()?2:1;
+  if(pressed['arrowup']||pressed['up']){G.titleSel=(G.titleSel+n-1)%n;sfx.select();}
+  if(pressed['arrowdown']||pressed['down']){G.titleSel=(G.titleSel+1)%n;sfx.select();}
+  if(btnA()){ sfx.select();
+    if(G.titleSel===1){ const s=loadSave(); if(s){applySave(s);return;} }
+    newGame();
+  }
+}
+function newGame(){
+  G.flags={}; G.party=[newCryn()]; G.items={potion:3,ether:1}; G.chests={};
+  G.playT=0; G.battlesWon=0; G.leverOrder=[];
+  loadMap('castle',9,8);
+  runEvent(STORY.intro);
+}
+function drawGameover(){
+  ctx.fillStyle='rgba(10,0,0,0.92)'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#e23b3b'; ctx.font='bold 28px Courier New'; ctx.textAlign='center';
+  ctx.fillText('YOU DIED',W/2,H/2-30);
+  ctx.fillStyle='#c9ced8'; ctx.font='12px Courier New';
+  ctx.fillText('The dark reflection claims another soul...',W/2,H/2);
+  ctx.fillStyle='#f2d13d';
+  ctx.fillText('A: return to last crystal',W/2,H/2+34);
+  ctx.fillText('B: back to title',W/2,H/2+54);
+  ctx.textAlign='left';
+}
+function updateGameover(){
+  if(btnA()){ const s=loadSave(); if(s){sfx.select();applySave(s);} else {G.state='title';playMusic('title');} }
+  if(btnB()){ sfx.back(); G.state='title'; playMusic('title'); }
+}
+function showEnding(){
+  G.state='ending'; G.flags.game_done=1; stopMusic(); playMusic('castle'); sfx.save();
+}
+function drawEnding(){
+  ctx.fillStyle='#050508'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#f2d13d'; ctx.font='bold 16px Courier New'; ctx.textAlign='center';
+  ctx.fillText('— THE DARK REFLECTION ENDS —',W/2,60);
+  ctx.fillStyle='#c9ced8'; ctx.font='12px Courier New';
+  const mins=Math.floor(G.playT/60);
+  ctx.fillText('Cryn refused the darkness within and without.',W/2,110);
+  ctx.fillText('Beorne is at peace. The artifact is ash.',W/2,132);
+  ctx.fillText('But somewhere, a voice whispers:',W/2,162);
+  ctx.fillStyle='#a05ce0';
+  ctx.fillText('"I will return.. one day.. when.. humans are weak.. again.."',W/2,184);
+  ctx.fillStyle='#8a8aa0';
+  ctx.fillText('Time: '+mins+' min   Battles won: '+G.battlesWon+'   Level: '+G.party[0].lv,W/2,220);
+  ctx.fillStyle='#f2d13d'; ctx.fillText('— THE END —  (press A)',W/2,256);
+  ctx.textAlign='left';
+}
+// ==================== MAIN LOOP ====================
+let lastT=0;
+function frame(t){
+  requestAnimationFrame(frame);
+  const dt=Math.min(0.05,(t-lastT)/1000||0.016); lastT=t;
+  G.playT+=(G.state==='explore'||G.state==='battle')?dt:0;
+  if(G.shakeT>0)G.shakeT--;
+  // typewriter
+  if(DLG.on&&!DLG.done){ DLG.shown+=dt*45; if(DLG.shown>=DLG.text.length){DLG.shown=DLG.text.length;DLG.done=true;} }
+  // event wait
+  if(G.state==='event'&&G.waitT>0){ G.waitT-=dt*1000; if(G.waitT<=0){G.waitT=0;doEv();} }
+  // mute toggle
+  if(pressed['m']){ muted=!muted; if(muted)stopMusic(); else playMusic(G.map?G.map.music:'title'); }
+  switch(G.state){
+    case 'title': updateTitle(); drawTitle(); break;
+    case 'explore': if(DLG.on)updateDialog(); else updateExplore(dt); drawExplore(); break;
+    case 'event': drawExplore(); if(!G.waitT)updateDialog(); else drawDialog(); break;
+    case 'battle': updateBattle(dt); drawBattle(); break;
+    case 'gameover': updateGameover(); drawGameover(); break;
+    case 'ending': if(btnA()){G.state='title';G.titleSel=0;playMusic('title');} drawEnding(); break;
+  }
+  clearPressed();
+}
+playMusic('title');
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
